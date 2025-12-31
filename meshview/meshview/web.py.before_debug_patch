@@ -1,0 +1,811 @@
+import asyncio
+import datetime
+import logging
+import os
+import re
+import ssl
+from dataclasses import dataclass
+
+import pydot
+from aiohttp import web
+from google.protobuf import text_format
+from google.protobuf.message import Message
+from jinja2 import Environment, PackageLoader, Undefined, select_autoescape
+from markupsafe import Markup
+import pathlib
+from meshtastic.protobuf.portnums_pb2 import PortNum
+from meshview import config, database, decode_payload, migrations, models, store
+from meshview.__version__ import (
+    __version_string__,
+)
+from meshview.web_api import api
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(filename)s:%(lineno)d [pid:%(process)d] %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger(__name__)
+SEQ_REGEX = re.compile(r"seq \d+")
+SOFTWARE_RELEASE = __version_string__  # Keep for backward compatibility
+CONFIG = config.CONFIG
+
+env = Environment(loader=PackageLoader("meshview"), autoescape=select_autoescape())
+
+# Start Database
+database.init_database(CONFIG["database"]["connection_string"])
+
+BASE_DIR = os.path.dirname(__file__)
+LANG_DIR = os.path.join(BASE_DIR, "lang")
+
+with open(os.path.join(os.path.dirname(__file__), '1x1.png'), 'rb') as png:
+    empty_png = png.read()
+
+
+@dataclass
+class Packet:
+    id: int
+    from_node_id: int
+    from_node: models.Node
+    to_node_id: int
+    to_node: models.Node
+    portnum: int
+    data: str
+    raw_mesh_packet: object
+    raw_payload: object
+    payload: str
+    pretty_payload: Markup
+    import_time: datetime.datetime
+    import_time_us: int
+
+    @classmethod
+    def from_model(cls, packet):
+        mesh_packet, payload = decode_payload.decode(packet)
+        pretty_payload = None
+
+        if mesh_packet:
+            mesh_packet.decoded.payload = b""
+            text_mesh_packet = text_format.MessageToString(mesh_packet)
+        else:
+            text_mesh_packet = "Did node decode"
+
+        if payload is None:
+            text_payload = "Did not decode"
+        elif isinstance(payload, Message):
+            text_payload = text_format.MessageToString(payload)
+        elif packet.portnum == PortNum.TEXT_MESSAGE_APP and packet.to_node_id != 0xFFFFFFFF:
+            text_payload = "<redacted>"
+        elif isinstance(payload, bytes):
+            text_payload = payload.decode("utf-8", errors="replace")  # decode bytes safely
+        else:
+            text_payload = str(payload)
+
+        if payload:
+            if (
+                packet.portnum == PortNum.POSITION_APP
+                and getattr(payload, "latitude_i", None)
+                and getattr(payload, "longitude_i", None)
+            ):
+                pretty_payload = Markup(
+                    f'<a href="https://www.google.com/maps/search/?api=1&query={payload.latitude_i * 1e-7},{payload.longitude_i * 1e-7}" target="_blank">map</a>'
+                )
+
+        return cls(
+            id=packet.id,
+            from_node=packet.from_node,
+            from_node_id=packet.from_node_id,
+            to_node=packet.to_node,
+            to_node_id=packet.to_node_id,
+            portnum=packet.portnum,
+            data=text_mesh_packet,
+            payload=text_payload,  # now always a string
+            pretty_payload=pretty_payload,
+            import_time=packet.import_time,
+            import_time_us=packet.import_time_us,  # <-- include microseconds
+            raw_mesh_packet=mesh_packet,
+            raw_payload=payload,
+        )
+
+
+async def build_trace(node_id):
+    trace = []
+    for raw_p in await store.get_packets_from(
+        node_id, PortNum.POSITION_APP, since=datetime.timedelta(hours=24)
+    ):
+        p = Packet.from_model(raw_p)
+        if not p.raw_payload or not p.raw_payload.latitude_i or not p.raw_payload.longitude_i:
+            continue
+        trace.append((p.raw_payload.latitude_i * 1e-7, p.raw_payload.longitude_i * 1e-7))
+
+    if not trace:
+        for raw_p in await store.get_packets_from(node_id, PortNum.POSITION_APP):
+            p = Packet.from_model(raw_p)
+            if not p.raw_payload or not p.raw_payload.latitude_i or not p.raw_payload.longitude_i:
+                continue
+            trace.append((p.raw_payload.latitude_i * 1e-7, p.raw_payload.longitude_i * 1e-7))
+            break
+
+    return trace
+
+
+async def build_neighbors(node_id):
+    packets = await store.get_packets_from(node_id, PortNum.NEIGHBORINFO_APP, limit=1)
+    packet = packets.first()
+
+    if not packet:
+        return []
+
+    _, payload = decode_payload.decode(packet)
+    neighbors = {}
+
+    # Gather node information asynchronously
+    tasks = {n.node_id: store.get_node(n.node_id) for n in payload.neighbors}
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    for neighbor, node in zip(payload.neighbors, results, strict=False):
+        if isinstance(node, Exception):
+            continue
+        if node and node.last_lat and node.last_long:
+            neighbors[neighbor.node_id] = {
+                'node_id': neighbor.node_id,
+                'snr': neighbor.snr,  # Fix dictionary keying issue
+                'short_name': node.short_name,
+                'long_name': node.long_name,
+                'location': (node.last_lat * 1e-7, node.last_long * 1e-7),
+            }
+
+    return list(neighbors.values())  # Return a list of dictionaries
+
+
+def node_id_to_hex(node_id):
+    if node_id is None or isinstance(node_id, Undefined):
+        return "Invalid node_id"  # i... have no clue
+    if node_id == 4294967295:
+        return "^all"
+    else:
+        return f"!{hex(node_id)[2:].zfill(8)}"
+
+
+def format_timestamp(timestamp):
+    if isinstance(timestamp, int):
+        timestamp = datetime.datetime.fromtimestamp(timestamp, datetime.UTC)
+    return timestamp.isoformat(timespec="milliseconds")
+
+
+env.filters["node_id_to_hex"] = node_id_to_hex
+env.filters["format_timestamp"] = format_timestamp
+
+# Initialize API module with dependencies
+api.init_api_module(Packet, SEQ_REGEX, LANG_DIR)
+
+# Create main routes table
+routes = web.RouteTableDef()
+
+
+@routes.get("/")
+async def index(request):
+    """
+    Redirect root URL '/' to the page specified in CONFIG['site']['starting'].
+    Defaults to '/map' if not set.
+    """
+    # Get the starting page from config
+    starting_url = CONFIG["site"].get("starting", "/map")  # default to /map if not set
+    raise web.HTTPFound(location=starting_url)
+
+
+# redirect for backwards compatibility
+@routes.get("/packet_list/{packet_id}")
+async def redirect_packet_list(request):
+    packet_id = request.match_info["packet_id"]
+    raise web.HTTPFound(location=f"/node/{packet_id}")
+
+# Generic static HTML route
+@routes.get("/{page}")
+async def serve_page(request):
+    page = request.match_info["page"]
+
+    # default to index.html if no extension
+    if not page.endswith(".html"):
+        page = f"{page}.html"
+
+    html_file = pathlib.Path(__file__).parent / "static" / page
+    if not html_file.exists():
+        raise web.HTTPNotFound(text=f"Page '{page}' not found")
+
+    content = html_file.read_text(encoding="utf-8")
+    return web.Response(text=content, content_type="text/html")
+
+
+
+@routes.get("/net")
+async def net(request):
+    return web.Response(
+        text=env.get_template("net.html").render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/map")
+async def map(request):
+    template = env.get_template("map.html")
+    return web.Response(text=template.render(), content_type="text/html")
+
+
+@routes.get("/nodelist")
+async def nodelist(request):
+    template = env.get_template("nodelist.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/firehose")
+async def firehose(request):
+    return web.Response(
+        text=env.get_template("firehose.html").render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/chat")
+async def chat(request):
+    template = env.get_template("chat.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/packet/{packet_id}")
+async def new_packet(request):
+    template = env.get_template("packet.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/node/{from_node_id}")
+async def firehose_node(request):
+    template = env.get_template("node.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/nodegraph")
+async def nodegraph(request):
+    template = env.get_template("nodegraph.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/top")
+async def top(request):
+    template = env.get_template("top.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+@routes.get("/stats")
+async def stats(request):
+    template = env.get_template("stats.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
+# Keep !!
+@routes.get("/graph/traceroute/{packet_id}")
+@routes.get("/graph/traceroute/{packet_id}")
+async def graph_traceroute(request):
+    packet_id = int(request.match_info['packet_id'])
+    
+    # Get the main packet
+    packet = await store.get_packet(packet_id)
+    if not packet:
+        return web.Response(status=404)
+    
+    # Try to find linked REQUEST or REPLY packet
+    linked_packet = None
+    is_reply = False
+    
+    if hasattr(packet, 'request_id') and packet.request_id and packet.request_id != packet.id:
+        # This is a REPLY packet - fetch the original REQUEST
+        is_reply = True
+        linked_packet = await store.get_packet(packet.request_id)
+    else:
+        # This is a REQUEST packet - try to find the REPLY
+        if hasattr(store, 'get_packet_by_request_id'):
+            reply_packets = await store.get_packet_by_request_id(packet_id)
+            for reply in reply_packets:
+                if (reply.from_node_id == packet.to_node_id and 
+                    reply.to_node_id == packet.from_node_id and
+                    reply.portnum == 70):
+                    linked_packet = reply
+                    break
+    
+    # Determine which is REQUEST and which is REPLY
+    if is_reply:
+        request_packet = linked_packet
+        reply_packet = packet
+    else:
+        request_packet = packet
+        reply_packet = linked_packet
+    
+    # Get traceroutes for both
+    request_traceroutes = list(await store.get_traceroute(request_packet.id)) if request_packet else []
+    reply_traceroutes = list(await store.get_traceroute(reply_packet.id)) if reply_packet else []
+    
+    # Gather all node IDs
+    node_ids = set()
+    
+    def add_nodes_from_traceroutes(traceroutes):
+        for tr in traceroutes:
+            route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+            node_ids.add(tr.gateway_node_id)
+            if route and route.route:
+                for node_id in route.route:
+                    node_ids.add(node_id)
+    
+    if request_packet:
+        node_ids.add(request_packet.from_node_id)
+        node_ids.add(request_packet.to_node_id)
+        add_nodes_from_traceroutes(request_traceroutes)
+    
+    if reply_packet:
+        node_ids.add(reply_packet.from_node_id)
+        node_ids.add(reply_packet.to_node_id)
+        add_nodes_from_traceroutes(reply_traceroutes)
+    
+    # Fetch all nodes
+    nodes = {}
+    async with asyncio.TaskGroup() as tg:
+        for node_id in node_ids:
+            nodes[node_id] = tg.create_task(store.get_node(node_id))
+    
+    # Create graph
+    graph = pydot.Dot('traceroute', graph_type="digraph", rankdir='LR')
+    
+    # Process REQUEST paths
+    request_paths = set()
+    request_mqtt_nodes = set()
+    saw_request_reply = False
+    
+    if request_traceroutes:
+        for tr in request_traceroutes:
+            if tr.done:
+                saw_request_reply = True
+            route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+            path = [request_packet.from_node_id]
+            if route and route.route:
+                path.extend(route.route)
+            if tr.done:
+                path.append(request_packet.to_node_id)
+            elif path[-1] != tr.gateway_node_id:
+                path.append(tr.gateway_node_id)
+            request_mqtt_nodes.add(tr.gateway_node_id)
+            request_paths.add(tuple(path))
+    
+    # Process REPLY paths
+    reply_paths = set()
+    reply_mqtt_nodes = set()
+    
+    if reply_traceroutes:
+        for tr in reply_traceroutes:
+            route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+            path = [reply_packet.from_node_id]
+            if route and route.route:
+                path.extend(route.route)
+            if tr.done:
+                path.append(reply_packet.to_node_id)
+            elif path[-1] != tr.gateway_node_id:
+                path.append(tr.gateway_node_id)
+            reply_mqtt_nodes.add(tr.gateway_node_id)
+            reply_paths.add(tuple(path))
+    
+    # Collect all nodes used
+    used_nodes = set()
+    for path in request_paths:
+        used_nodes.update(path)
+    for path in reply_paths:
+        used_nodes.update(path)
+    
+    # Add nodes to graph
+    for node_id in used_nodes:
+        node = await nodes[node_id]
+        if not node:
+            node_name = node_id_to_hex(node_id)
+        else:
+            node_name = f'[{node.short_name}] {node.long_name}\\n{node_id_to_hex(node_id)}\\n{node.role}'
+        
+        # Determine node style
+        is_source = (request_packet and node_id == request_packet.from_node_id)
+        is_dest = (request_packet and node_id == request_packet.to_node_id)
+        is_mqtt = node_id in request_mqtt_nodes or node_id in reply_mqtt_nodes
+        
+        if is_source or is_dest:
+            style = 'filled'
+            fillcolor = '#90EE90' if is_source else '#FFB6C1'
+        elif is_mqtt:
+            style = 'solid'
+            fillcolor = 'white'
+        else:
+            style = 'dashed'
+            fillcolor = 'white'
+        
+        # Add labels
+        if is_source:
+            node_name += '\\n[SOURCE]'
+        if is_dest:
+            node_name += '\\n[DEST]'
+            if not saw_request_reply and not reply_paths:
+                node_name += '\\n(NO REPLY)'
+        
+        graph.add_node(
+            pydot.Node(
+                str(node_id),
+                label=node_name,
+                shape='box',
+                style=style,
+                fillcolor=fillcolor,
+                href=f"/packet_list/{node_id}",
+            )
+        )
+    
+    # Add REQUEST path edges (solid forward arrows)
+    for path in request_paths:
+        for src, dest in zip(path, path[1:]):
+            graph.add_edge(
+                pydot.Edge(
+                    str(src), 
+                    str(dest), 
+                    color='#2E86AB',
+                    style='solid',
+                    penwidth='2',
+                    label='REQ →'
+                )
+            )
+    
+    # Add REPLY path edges (dashed backward arrows)
+    for path in reply_paths:
+        for src, dest in zip(path, path[1:]):
+            graph.add_edge(
+                pydot.Edge(
+                    str(src), 
+                    str(dest), 
+                    color='#A23B72',
+                    style='dashed',
+                    penwidth='2',
+                    label='← REP',
+                    dir='back'
+                )
+            )
+    
+    return web.Response(
+        body=graph.create_svg(),
+        content_type="image/svg+xml",
+    )
+
+
+@routes.get("/debug/traceroute/{packet_id}")
+async def debug_traceroute(request):
+    """Debug view showing all MQTT packets that contribute to the traceroute graph
+    
+    Now properly handles REQUEST and REPLY packets by linking them via request_id.
+    """
+    packet_id = int(request.match_info['packet_id'])
+    
+    # Get the main packet
+    packet = await store.get_packet(packet_id)
+    if not packet:
+        return web.Response(status=404, text="Packet not found")
+    
+    # Try to find linked REQUEST or REPLY packet
+    linked_packet = None
+    is_reply = False
+    
+    if hasattr(packet, 'request_id') and packet.request_id and packet.request_id != packet.id:
+        # This is a REPLY packet - fetch the original REQUEST
+        is_reply = True
+        linked_packet = await store.get_packet(packet.request_id)
+    else:
+        # This is a REQUEST packet - try to find the REPLY
+        if hasattr(store, 'get_packet_by_request_id'):
+            reply_packets = await store.get_packet_by_request_id(packet_id)
+            # Filter for traceroute replies (from=our_to, to=our_from)
+            for reply in reply_packets:
+                if (reply.from_node_id == packet.to_node_id and 
+                    reply.to_node_id == packet.from_node_id and
+                    reply.portnum == 70):  # TRACEROUTE_APP
+                    linked_packet = reply
+                    break
+    
+    # Get traceroutes
+    traceroutes = list(await store.get_traceroute(packet_id))
+    
+    # Gather all node IDs we need to look up
+    node_ids = set()
+    for tr in traceroutes:
+        route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+        node_ids.add(tr.gateway_node_id)
+        if route and route.route:
+            for node_id in route.route:
+                node_ids.add(node_id)
+    node_ids.add(packet.from_node_id)
+    node_ids.add(packet.to_node_id)
+    
+    # Add linked packet nodes if exists
+    if linked_packet:
+        node_ids.add(linked_packet.from_node_id)
+        node_ids.add(linked_packet.to_node_id)
+    
+    # Fetch all nodes
+    nodes = {}
+    async with asyncio.TaskGroup() as tg:
+        for node_id in node_ids:
+            nodes[node_id] = tg.create_task(store.get_node(node_id))
+    
+    # Build debug info for each traceroute record
+    debug_records = []
+    for tr in traceroutes:
+        route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+        
+        gateway_node = await nodes.get(tr.gateway_node_id)
+        gateway_name = gateway_node.short_name if gateway_node else node_id_to_hex(tr.gateway_node_id)
+        
+        # Decode the route nodes
+        route_nodes = []
+        if route and route.route:
+            for node_id in route.route:
+                node = await nodes.get(node_id)
+                node_name = node.short_name if node else node_id_to_hex(node_id)
+                route_nodes.append(f"{node_name} ({node_id})")
+        
+        # Get SNR values if available
+        snr_values = []
+        if route and hasattr(route, 'snr_towards') and route.snr_towards:
+            snr_values = [f"{snr/4.0:.2f}dB" for snr in route.snr_towards[:len(route.route)]]
+        
+        # Determine if gateway is in the route (actively forwarded) or just overheard
+        gateway_in_route = False
+        if route and route.route:
+            gateway_in_route = tr.gateway_node_id in route.route
+        
+        debug_records.append({
+            'gateway_id': tr.gateway_node_id,
+            'gateway_name': gateway_name,
+            'done': tr.done,
+            'route_length': len(route.route) if route and route.route else 0,
+            'route_bytes': len(tr.route) if tr.route else 0,
+            'route_nodes': route_nodes,
+            'snr_values': snr_values,
+            'import_time': tr.import_time.isoformat() if tr.import_time else 'N/A',
+            'gateway_in_route': gateway_in_route
+        })
+    
+    # Sort by route length descending (most complete first)
+    debug_records.sort(key=lambda x: x['route_length'], reverse=True)
+    
+    # Get node names
+    from_node = await nodes.get(packet.from_node_id)
+    to_node = await nodes.get(packet.to_node_id)
+    from_name = from_node.short_name if from_node else node_id_to_hex(packet.from_node_id)
+    to_name = to_node.short_name if to_node else node_id_to_hex(packet.to_node_id)
+    
+    # Statistics
+    total_reports = len(traceroutes)
+    in_path_forwarders = sum(1 for r in debug_records if r['gateway_in_route'])
+    overheard_only = sum(1 for r in debug_records if not r['gateway_in_route'])
+    reply_packets = sum(1 for r in debug_records if r['done'])
+    max_route_length = max((r['route_length'] for r in debug_records), default=0)
+    
+    # Build HTML response
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Traceroute Debug - Packet {packet_id}</title>
+        <style>
+            body {{ font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }}
+            h1 {{ color: #4ec9b0; }}
+            h2 {{ color: #569cd6; margin-top: 30px; }}
+            .summary {{ background: #252526; padding: 15px; border-left: 3px solid #4ec9b0; margin: 20px 0; }}
+            .record {{ background: #252526; padding: 15px; margin: 10px 0; border-left: 3px solid #555; }}
+            .record.reply {{ border-left-color: #4ec9b0; }}
+            .record.longest {{ border-left-color: #f9d71c; background: #2d2d1a; }}
+            .field {{ margin: 5px 0; }}
+            .label {{ color: #9cdcfe; font-weight: bold; }}
+            .value {{ color: #ce9178; }}
+            .route-list {{ color: #4ec9b0; margin-left: 20px; }}
+            .snr {{ color: #b5cea8; }}
+            iframe {{ width: 100%; height: 600px; border: 2px solid #444; margin: 20px 0; }}
+            .stats {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }}
+            .stat-box {{ background: #2d2d30; padding: 10px; border-radius: 5px; }}
+            .stat-value {{ font-size: 24px; color: #4ec9b0; }}
+            .warning {{ color: #f48771; }}
+            .linked-box {{ background: #2d2d30; padding: 15px; margin: 20px 0; border-left: 3px solid #4ec9b0; }}
+            ul {{ color: #d4d4d4; margin-left: 20px; }}
+            ul li {{ margin: 5px 0; }}
+            a {{ color: #4ec9b0; text-decoration: none; }}
+            a:hover {{ text-decoration: underline; }}
+        </style>
+    </head>
+    <body>
+        <h1>Traceroute Debug View - Packet {packet_id}</h1>
+        
+        <div class="summary">
+            <div class="field"><span class="label">From:</span> <span class="value">{from_name} ({packet.from_node_id})</span></div>
+            <div class="field"><span class="label">To:</span> <span class="value">{to_name} ({packet.to_node_id})</span></div>
+            <div class="field"><span class="label">Packet Type:</span> <span class="value">{'REPLY' if is_reply else 'REQUEST'}</span></div>
+        </div>
+    """
+    
+    # Add linked packet info if found
+    if linked_packet:
+        linked_from = await nodes.get(linked_packet.from_node_id)
+        linked_to = await nodes.get(linked_packet.to_node_id)
+        linked_from_name = linked_from.short_name if linked_from else node_id_to_hex(linked_packet.from_node_id)
+        linked_to_name = linked_to.short_name if linked_to else node_id_to_hex(linked_packet.to_node_id)
+        
+        html += f"""
+        <div class="linked-box">
+            <div class="field">
+                <span class="label">&#x2713; Linked {'REQUEST' if is_reply else 'REPLY'} Packet Found!</span>
+            </div>
+            <div class="field">
+                <span class="label">Packet ID:</span>
+                <span class="value">
+                    <a href="/debug/traceroute/{linked_packet.id}">{linked_packet.id}</a>
+                </span>
+                ({linked_from_name} &#x2192; {linked_to_name})
+            </div>
+        </div>
+        """
+    
+    html += f"""
+        <h2>Statistics</h2>
+        <div class="stats">
+            <div class="stat-box">
+                <div class="label">Total MQTT Reports</div>
+                <div class="stat-value">{total_reports}</div>
+            </div>
+            <div class="stat-box">
+                <div class="label">In-Path Forwarders</div>
+                <div class="stat-value">{in_path_forwarders}</div>
+                <div style="font-size: 12px; color: #9cdcfe; margin-top: 5px;">&#x21AA; Actively relayed packet</div>
+            </div>
+            <div class="stat-box">
+                <div class="label">Overheard Only</div>
+                <div class="stat-value">{overheard_only}</div>
+                <div style="font-size: 12px; color: #9cdcfe; margin-top: 5px;">&#x1F441; Nearby listeners</div>
+            </div>
+            <div class="stat-box">
+                <div class="label">Reply Packets</div>
+                <div class="stat-value">{reply_packets}</div>
+            </div>
+            <div class="stat-box">
+                <div class="label">Max Route Length</div>
+                <div class="stat-value">{max_route_length} hops</div>
+            </div>
+        </div>
+        
+        <h2>Explanation</h2>
+        <ul>
+            <li><strong>&#x21AA; In-Path Forwarders:</strong> These nodes actively forwarded the packet (they appear in the route array)</li>
+            <li><strong>&#x1F441; Overheard Only:</strong> These nodes heard the packet on their radio but didn't forward it (nearby listeners)</li>
+        </ul>
+        
+        <h2>Original Graph</h2>
+        <iframe src="/graph/traceroute/{packet_id}"></iframe>
+        
+        <h2>All MQTT Reports ({total_reports} total)</h2>
+    """
+    
+    # Add each debug record
+    for i, record in enumerate(debug_records):
+        reply_class = "reply" if record['done'] else ""
+        longest_class = "longest" if i == 0 else ""
+        classes = f"{reply_class} {longest_class}".strip()
+        
+        html += f"""
+        <div class="record {classes}">
+            <div class="field">
+                <span class="label">Gateway:</span> 
+                <span class="value">{record['gateway_name']} ({record['gateway_id']})</span>
+                {' <span class="warning">&#x2605; LONGEST ROUTE</span>' if i == 0 else ''}
+                {' <span class="warning">&#x2713; REPLY PACKET</span>' if record['done'] else ''}
+            </div>
+            <div class="field">
+                <span class="label">MQTT Uplink Type:</span> 
+                <span class="value">{'&#x21AA; IN-PATH FORWARDING NODE (actively relayed packet)' if record['gateway_in_route'] else '&#x1F441; OVERHEARD ONLY (nearby listener, did not forward)'}</span>
+            </div>
+            <div class="field">
+                <span class="label">Route Data Size:</span> 
+                <span class="value">{record['route_bytes']} bytes &#x2192; {record['route_length']} hops</span>
+            </div>
+            <div class="field">
+                <span class="label">Import Time:</span> 
+                <span class="value">{record['import_time']}</span>
+            </div>
+            <div class="field">
+                <span class="label">Route Path:</span>
+                <div class="route-list">
+                    {from_name} ({packet.from_node_id})
+        """
+        
+        for j, node_str in enumerate(record['route_nodes']):
+            snr = f" [SNR: {record['snr_values'][j]}]" if j < len(record['snr_values']) else ""
+            html += f"<br>&#x2192; {node_str}<span class='snr'>{snr}</span>"
+        
+        if record['done']:
+            html += f"<br>&#x2192; {to_name} ({packet.to_node_id}) <span class='warning'>[DESTINATION REACHED]</span>"
+        else:
+            html += f"<br>&#x2192; {record['gateway_name']} ({record['gateway_id']}) [MQTT uplink]"
+            html += f"<br><span class='warning'>&#x26A0; Destination not in route - packet may not have reached {to_name}</span>"
+        
+        html += """
+                </div>
+            </div>
+        </div>
+        """
+    
+    html += """
+    </body>
+    </html>
+    """
+    
+    return web.Response(body=html, content_type='text/html')
+
+async def run_server():
+    # Wait for database migrations to complete before starting web server
+    logger.info("Checking database schema status...")
+    database_url = CONFIG["database"]["connection_string"]
+
+    # Wait for migrations to complete (writer app responsibility)
+    migration_ready = await migrations.wait_for_migrations(
+        database.engine, database_url, max_retries=30, retry_delay=2
+    )
+
+    if not migration_ready:
+        logger.error("Database schema is not up to date. Cannot start web server.")
+        raise RuntimeError("Database schema version mismatch - migrations not complete")
+
+    logger.info("Database schema verified - starting web server")
+
+    app = web.Application()
+    app.add_routes(api.routes)  # Add API routes
+    app.add_routes(routes)  # Add main web routes
+
+    # Check if access logging should be disabled
+    enable_access_log = CONFIG.get("logging", {}).get("access_log", "False").lower() == "true"
+    access_log_handler = None if not enable_access_log else logging.getLogger("aiohttp.access")
+
+    runner = web.AppRunner(app, access_log=access_log_handler)
+    await runner.setup()
+    if CONFIG["server"]["tls_cert"]:
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain(CONFIG["server"]["tls_cert"])
+        logger.info(f"TLS enabled with certificate: {CONFIG['server']['tls_cert']}")
+    else:
+        ssl_context = None
+        logger.info("TLS disabled")
+    if host := CONFIG["server"]["bind"]:
+        port = CONFIG["server"]["port"]
+        protocol = "https" if ssl_context else "http"
+        site = web.TCPSite(runner, host, port, ssl_context=ssl_context)
+        await site.start()
+        # Display localhost instead of wildcard addresses for usability
+        display_host = "localhost" if host in ("0.0.0.0", "*", "::") else host
+        logger.info(f"Web server started at {protocol}://{display_host}:{port}")
+    while True:
+        await asyncio.sleep(3600)  # sleep forever

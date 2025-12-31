@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+
+{% block css %}
+<style>
+    body { background-color: #121212; color: #ddd; }
+    h1 { text-align: center; margin-top: 20px; color: #fff; }
+
+    .top-container {
+        max-width: 1100px;
+        margin: 25px auto;
+        padding: 0 15px;
+    }
+
+    .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 20px;
+        margin-bottom: 15px;
+    }
+
+    .filter-bar select {
+        background-color: #1f2327;
+        border: 1px solid #444;
+        color: #ddd;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+    }
+
+    table th, table td {
+        padding: 12px;
+        border: 1px solid #444;
+        text-align: left;
+        color: #ddd;
+    }
+
+    table th { background-color: #333; }
+    table tbody tr:nth-child(odd) { background-color: #272b2f; }
+    table tbody tr:nth-child(even) { background-color: #212529; }
+    table tbody tr:hover { background-color: #555; cursor: pointer; }
+
+    .node-link {
+        color: #9fd4ff;
+        text-decoration: none;
+    }
+    .node-link:hover { text-decoration: underline; }
+
+    .good-x { color: #81ff81; font-weight: bold; }
+    .ok-x { color: #e8e86d; font-weight: bold; }
+    .bad-x { color: #ff6464; font-weight: bold; }
+</style>
+{% endblock %}
+
+{% block body %}
+
+<h1 data-translate-lang="top_traffic_nodes">Top Nodes Traffic</h1>
+
+<div class="top-container">
+
+    <div class="filter-bar">
+        <div>
+            <label for="channelFilter" data-translate-lang="channel">Channel:</label>
+            <select id="channelFilter" class="form-select form-select-sm" style="width:auto;"></select>
+        </div>
+
+        <div>
+            <label for="nodeSearch" data-translate-lang="search">Search:</label>
+            <input id="nodeSearch" type="text" class="form-control form-control-sm"
+                   placeholder="Search nodes..."
+                   data-translate-lang="search_placeholder"
+                   style="width:180px; display:inline-block;">
+        </div>
+    </div>
+
+    <!-- ⭐ ADDED NODE COUNT ⭐ -->
+    <div id="count-container" style="margin-bottom:10px; font-weight:bold;">
+        <span data-translate-lang="showing_nodes">Showing</span>
+        <span id="node-count">0</span>
+        <span data-translate-lang="nodes_suffix">nodes</span>
+    </div>
+
+    <div class="table-responsive">
+        <table id="nodesTable">
+            <thead>
+                <tr>
+                    <th data-translate-lang="long_name">Long Name</th>
+                    <th data-translate-lang="short_name">Short Name</th>
+                    <th data-translate-lang="channel">Channel</th>
+                    <th data-translate-lang="packets_sent">Sent (24h)</th>
+                    <th data-translate-lang="times_seen">Seen (24h)</th>
+                    <th data-translate-lang="avg_gateways">Avg Gateways</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+</div>
+
+<script>
+/* ======================================================
+   TOP PAGE TRANSLATION (isolated from base)
+   ====================================================== */
+let topTranslations = {};
+
+function applyTranslationsTop(dict, root=document) {
+    root.querySelectorAll("[data-translate-lang]").forEach(el => {
+        const key = el.dataset.translateLang;
+        if (!dict[key]) return;
+
+        // input placeholder support
+        if (el.tagName === "INPUT" && el.placeholder !== undefined) {
+            el.placeholder = dict[key];
+        } else {
+            el.textContent = dict[key];
+        }
+    });
+}
+
+async function loadTranslationsTop() {
+    try {
+        const cfg = await window._siteConfigPromise;
+        const lang = cfg?.site?.language || "en";
+
+        const res = await fetch(`/api/lang?lang=${lang}&section=top`);
+        topTranslations = await res.json();
+
+        applyTranslationsTop(topTranslations);
+    } catch (err) {
+        console.error("TOP translation load failed:", err);
+    }
+}
+
+/* ======================================================
+   PAGE LOGIC
+   ====================================================== */
+let allNodes = [];
+
+async function loadChannels() {
+    try {
+        const res = await fetch("/api/channels");
+        const data = await res.json();
+        const channels = data.channels || [];
+
+        const select = document.getElementById("channelFilter");
+
+        // LongFast first
+        if (channels.includes("LongFast")) {
+            const opt = document.createElement("option");
+            opt.value = "LongFast";
+            opt.textContent = "LongFast";
+            select.appendChild(opt);
+        }
+
+        for (const ch of channels) {
+            if (ch === "LongFast") continue;
+            const opt = document.createElement("option");
+            opt.value = ch;
+            opt.textContent = ch;
+            select.appendChild(opt);
+        }
+
+        select.addEventListener("change", renderTable);
+    } catch (err) {
+        console.error("Error loading channels:", err);
+    }
+}
+
+async function loadNodes() {
+    try {
+        const res = await fetch("/api/nodes");
+        const data = await res.json();
+        allNodes = data.nodes || [];
+    } catch (err) {
+        console.error("Error loading nodes:", err);
+    }
+}
+
+async function fetchNodeStats(nodeId) {
+    try {
+        const res = await fetch(`/api/stats/count?from_node=${nodeId}&period_type=day&length=1`);
+        const data = await res.json();
+
+        const sent = data.total_packets || 0;
+        const seen = data.total_seen || 0;
+        const avg = seen / Math.max(sent, 1);
+
+        return { sent, seen, avg };
+    } catch (err) {
+        console.error("Stat error:", err);
+        return { sent: 0, seen: 0, avg: 0 };
+    }
+}
+
+function avgClass(v) {
+    if (v >= 10) return "good-x";
+    if (v >= 2) return "ok-x";
+    return "bad-x";
+}
+
+async function renderTable() {
+    const tbody = document.querySelector("#nodesTable tbody");
+    tbody.innerHTML = "";
+
+    const channel = document.getElementById("channelFilter").value;
+    const searchText = document.getElementById("nodeSearch").value.trim().toLowerCase();
+
+    // Filter by channel
+    let filtered = allNodes.filter(n => n.channel === channel);
+
+    // Filter by search
+    if (searchText !== "") {
+        filtered = filtered.filter(n =>
+            (n.long_name && n.long_name.toLowerCase().includes(searchText)) ||
+            (n.short_name && n.short_name.toLowerCase().includes(searchText)) ||
+            String(n.node_id).includes(searchText)
+        );
+    }
+
+    // Placeholder rows first
+    const rowRefs = filtered.map(n => {
+        const tr = document.createElement("tr");
+        tr.addEventListener("click", () => window.location.href = `/node/${n.node_id}`);
+
+        const tdLong = document.createElement("td");
+        const a = document.createElement("a");
+        a.href = `/node/${n.node_id}`;
+        a.textContent = n.long_name || n.node_id;
+        a.className = "node-link";
+        a.addEventListener("click", e => e.stopPropagation());
+        tdLong.appendChild(a);
+
+        const tdShort = document.createElement("td");
+        tdShort.textContent = n.short_name || "";
+
+        const tdChannel = document.createElement("td");
+        tdChannel.textContent = n.channel || "";
+
+        const tdSent = document.createElement("td");
+        tdSent.textContent = "...";
+
+        const tdSeen = document.createElement("td");
+        tdSeen.textContent = "...";
+
+        const tdAvg = document.createElement("td");
+        tdAvg.textContent = "...";
+
+        tr.appendChild(tdLong);
+        tr.appendChild(tdShort);
+        tr.appendChild(tdChannel);
+        tr.appendChild(tdSent);
+        tr.appendChild(tdSeen);
+        tr.appendChild(tdAvg);
+
+        tbody.appendChild(tr);
+
+        return { node: n, tr, tdSent, tdSeen, tdAvg };
+    });
+
+    // Fetch stats
+    const statsList = await Promise.all(
+        rowRefs.map(ref => fetchNodeStats(ref.node.node_id))
+    );
+
+    // Update rows
+    let combined = rowRefs.map((ref, i) => {
+        const stats = statsList[i];
+
+        ref.tdSent.textContent = stats.sent;
+        ref.tdSeen.textContent = stats.seen;
+        ref.tdAvg.innerHTML =
+            `<span class="${avgClass(stats.avg)}">${stats.avg.toFixed(1)}</span>`;
+
+        return { tr: ref.tr, sent: stats.sent, seen: stats.seen };
+    });
+
+    // Remove nodes with no activity
+    combined = combined.filter(r => !(r.sent === 0 && r.seen === 0));
+
+    // Sort by seen
+    combined.sort((a, b) => b.seen - a.seen);
+
+    tbody.innerHTML = "";
+    for (const r of combined) tbody.appendChild(r.tr);
+
+    // ⭐ UPDATE COUNT ⭐
+    document.getElementById("node-count").textContent = combined.length;
+}
+
+/* ======================================================
+   INITIALIZE PAGE
+   ====================================================== */
+document.addEventListener("DOMContentLoaded", async () => {
+    await loadTranslationsTop();   // ⭐ MUST run first
+    await loadNodes();
+    await loadChannels();
+
+    document.getElementById("channelFilter").value = "LongFast";
+    document.getElementById("nodeSearch").addEventListener("input", renderTable);
+
+    renderTable();
+});
+</script>
+
+{% endblock %}
