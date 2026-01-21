@@ -324,23 +324,39 @@ async def graph_traceroute(request):
             status=404,
         )
 
-    # Find related packets (request/response pairs)
+    # Find related packets (request/response pairs) - strict matching
     related_packets = []
-    if packet.from_node_id and packet.to_node_id:
-        # Find packets with swapped from/to
+    if packet.from_node_id and packet.to_node_id and packet.import_time_us:
+        # Only look within ±5 minutes of current packet
+        time_window_us = 5 * 60 * 1_000_000  # 5 minutes in microseconds
+        time_start = packet.import_time_us - time_window_us
+        time_end = packet.import_time_us + time_window_us
+
+        # Find packets with swapped from/to within time window
         related = await store.get_packets(
             from_node_id=packet.to_node_id,
             to_node_id=packet.from_node_id,
             portnum=70,  # TRACEROUTE_APP
-            limit=10
+            after=time_start,
+            limit=20
         )
+
         for rel_pkt in related:
-            if rel_pkt.id != packet_id:
+            # Skip self and packets outside time window
+            if rel_pkt.id == packet_id or rel_pkt.import_time_us > time_end:
+                continue
+
+            # Only include if this packet has traceroute data
+            rel_traceroutes = list(await store.get_traceroute(rel_pkt.id))
+            if rel_traceroutes:
                 direction = "Response Packet" if rel_pkt.from_node_id == packet.to_node_id else "Request Packet"
                 related_packets.append({
                     'id': rel_pkt.id,
                     'direction': direction
                 })
+                # Only show the first related packet in each direction
+                if len(related_packets) >= 2:
+                    break
 
     node_ids = set()
     for tr in traceroutes:
