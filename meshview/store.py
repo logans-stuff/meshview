@@ -131,13 +131,55 @@ async def has_packets(node_id, portnum):
 
 
 async def get_traceroute(packet_id):
+    """
+    Get traceroutes for a packet. If none found, search for related packets
+    (packets with swapped from/to nodes) which may have the traceroute data.
+
+    This handles the case where traceroute data is stored on the response packet
+    but the user is querying the original request packet.
+    """
     async with database.async_session() as session:
+        # First, try direct lookup
         result = await session.execute(
             select(Traceroute)
             .where(Traceroute.packet_id == packet_id)
             .order_by(Traceroute.import_time_us)
         )
-        return result.scalars()
+        traceroutes = list(result.scalars())
+
+        # If no traceroutes found, look for related packets with swapped from/to
+        if not traceroutes:
+            # Get the original packet to find its from/to nodes
+            packet_result = await session.execute(
+                select(Packet).where(Packet.id == packet_id)
+            )
+            packet = packet_result.scalar_one_or_none()
+
+            if packet and packet.from_node_id and packet.to_node_id:
+                # Find packets with swapped from/to and same portnum
+                related_packets = await session.execute(
+                    select(Packet.id)
+                    .where(
+                        and_(
+                            Packet.from_node_id == packet.to_node_id,
+                            Packet.to_node_id == packet.from_node_id,
+                            Packet.portnum == 70  # TRACEROUTE_APP
+                        )
+                    )
+                    .order_by(Packet.import_time_us)
+                )
+                related_packet_ids = [row[0] for row in related_packets]
+
+                # Get traceroutes from related packets
+                if related_packet_ids:
+                    result = await session.execute(
+                        select(Traceroute)
+                        .where(Traceroute.packet_id.in_(related_packet_ids))
+                        .order_by(Traceroute.import_time_us)
+                    )
+                    traceroutes = list(result.scalars())
+
+        return iter(traceroutes)
 
 
 async def get_traceroutes(since):
