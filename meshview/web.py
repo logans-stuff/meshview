@@ -491,23 +491,56 @@ async def graph_traceroute(request):
             graph.add_edge(pydot.Edge(src, dest_node, color=color))
 
     # Build route analysis data
+    # IMPORTANT: Identify the traceroute INITIATOR (who started the exchange)
+    # The traceroute exchange has a request and response - we need to show
+    # paths relative to whoever initiated it, not relative to current packet
+
+    initiator_id = None
+    target_id = None
+
+    # Find the initiator by looking at traceroutes
+    for tr in traceroutes:
+        tr_packet = await store.get_packet(tr.packet_id)
+        if tr_packet:
+            if not tr.done:
+                # This is a request/incomplete hop - this packet's sender is the initiator
+                initiator_id = tr_packet.from_node_id
+                target_id = tr_packet.to_node_id
+                break
+            elif tr.done and not initiator_id:
+                # This is a completed response - sender is target, receiver is initiator
+                initiator_id = tr_packet.to_node_id
+                target_id = tr_packet.from_node_id
+
+    # Fallback to current packet if we couldn't determine initiator
+    if not initiator_id:
+        initiator_id = packet.from_node_id
+        target_id = packet.to_node_id
+
     forward_path_nodes = []
     return_path_nodes = []
     forward_complete = False
     return_complete = False
 
-    # Analyze paths
+    # Analyze paths relative to the INITIATOR (not current packet)
     for path in paths:
-        if path[0] == packet.from_node_id:
-            # Forward path (starts from source)
+        # Forward direction: initiator → target
+        if path[0] == initiator_id and path[-1] == target_id:
+            forward_complete = True
             if not forward_path_nodes or len(path) > len(forward_path_nodes):
                 forward_path_nodes = list(path)
-                forward_complete = path[-1] == packet.to_node_id
-        elif path[0] == packet.to_node_id:
-            # Return path (starts from destination)
+        elif path[0] == initiator_id and not forward_path_nodes:
+            # Incomplete forward path
+            forward_path_nodes = list(path)
+
+        # Return direction: target → initiator
+        if path[0] == target_id and path[-1] == initiator_id:
+            return_complete = True
             if not return_path_nodes or len(path) > len(return_path_nodes):
                 return_path_nodes = list(path)
-                return_complete = path[-1] == packet.from_node_id
+        elif path[0] == target_id and not return_path_nodes:
+            # Incomplete return path
+            return_path_nodes = list(path)
 
     # Convert node IDs to names for display
     async def get_node_name(node_id):
@@ -538,11 +571,11 @@ async def graph_traceroute(request):
     elif return_path_nodes and not forward_path_nodes:
         routing_status = {'class': 'incomplete', 'text': 'RETURN PATH ONLY'}
 
-    # Get node names for packet info
-    from_node = await nodes.get(packet.from_node_id)
-    to_node = await nodes.get(packet.to_node_id)
-    from_node_name = from_node.long_name if from_node else node_id_to_hex(packet.from_node_id)
-    to_node_name = to_node.long_name if to_node else node_id_to_hex(packet.to_node_id)
+    # Get node names for packet info - use initiator/target, not current packet
+    from_node = await nodes.get(initiator_id)
+    to_node = await nodes.get(target_id)
+    from_node_name = from_node.long_name if from_node else node_id_to_hex(initiator_id)
+    to_node_name = to_node.long_name if to_node else node_id_to_hex(target_id)
 
     # Render template with analysis
     template = env.get_template('traceroute.html')
