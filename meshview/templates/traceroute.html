@@ -239,7 +239,9 @@
                 {% for pkt in related_packets %}
                 <div class="related-packet">
                     <span class="path-direction">{{ pkt.direction }}:</span>
-                    <a href="/graph/traceroute/{{ pkt.id }}">{{ pkt.id }}</a>
+                    <a href="/packet/{{ pkt.id }}">{{ pkt.id }}</a>
+                    <span style="color: #666; margin: 0 5px;">|</span>
+                    <a href="/graph/traceroute/{{ pkt.id }}" style="font-size: 0.85em;">traceroute</a>
                 </div>
                 {% endfor %}
             </div>
