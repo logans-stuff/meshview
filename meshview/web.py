@@ -558,18 +558,23 @@ async def graph_traceroute(request):
         return_path_display.append(await get_node_name(node_id))
 
     # Determine routing status
+    # IMPORTANT: Only mark as ASYMMETRIC when BOTH directions completed
     routing_status = None
-    if forward_path_nodes and return_path_nodes:
-        # Check if paths are the same (symmetric)
+    if forward_complete and return_complete:
+        # Both directions completed - check if paths are the same
         forward_reversed = list(reversed(forward_path_nodes))
         if forward_reversed == return_path_nodes:
             routing_status = {'class': 'symmetric', 'text': 'SYMMETRIC ROUTING'}
         else:
             routing_status = {'class': 'asymmetric', 'text': 'ASYMMETRIC ROUTING'}
-    elif forward_path_nodes and not return_path_nodes:
+    elif forward_complete and not return_complete:
         routing_status = {'class': 'incomplete', 'text': 'NO RETURN PATH'}
-    elif return_path_nodes and not forward_path_nodes:
-        routing_status = {'class': 'incomplete', 'text': 'RETURN PATH ONLY'}
+    elif return_complete and not forward_complete:
+        routing_status = {'class': 'incomplete', 'text': 'NO FORWARD PATH'}
+    elif forward_path_nodes or return_path_nodes:
+        routing_status = {'class': 'incomplete', 'text': 'INCOMPLETE'}
+    else:
+        routing_status = {'class': 'incomplete', 'text': 'NO PATH DATA'}
 
     # Get node names for packet info - use initiator/target, not current packet
     from_node = await nodes.get(initiator_id)
