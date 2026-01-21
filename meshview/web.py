@@ -330,16 +330,6 @@ async def graph_traceroute(request):
         node_ids.add(tr.gateway_node_id)
         for node_id in route.route:
             node_ids.add(node_id)
-        # Also collect nodes from return path
-        if hasattr(route, 'route_back'):
-            for node_id in route.route_back:
-                node_ids.add(node_id)
-        # Handle route_return field if present
-        if tr.route_return:
-            route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
-            if route_return and hasattr(route_return, 'route'):
-                for node_id in route_return.route:
-                    node_ids.add(node_id)
     node_ids.add(packet.from_node_id)
     node_ids.add(packet.to_node_id)
 
@@ -362,8 +352,6 @@ async def graph_traceroute(request):
         if tr.done and dest:
             continue
         route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
-
-        # Process forward path
         path = [packet.from_node_id]
         path.extend(route.route)
         if tr.done:
@@ -379,24 +367,6 @@ async def graph_traceroute(request):
         mqtt_nodes.add(tr.gateway_node_id)
         node_color[path[-1]] = '#' + hex(hash(tuple(path)))[3:9]
         paths.add(tuple(path))
-
-        # Process return path (route_back) - direction is reversed
-        if hasattr(route, 'route_back') and route.route_back:
-            return_path = [packet.to_node_id]  # Start from destination
-            return_path.extend(route.route_back)
-            return_path.append(packet.from_node_id)  # End at source
-            node_color[return_path[-1]] = '#' + hex(hash(tuple(return_path)))[3:9]
-            paths.add(tuple(return_path))
-
-        # Process route_return field if present
-        if tr.route_return:
-            route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
-            if route_return and hasattr(route_return, 'route'):
-                return_path_alt = [packet.to_node_id]  # Start from destination
-                return_path_alt.extend(route_return.route)
-                return_path_alt.append(packet.from_node_id)  # End at source
-                node_color[return_path_alt[-1]] = '#' + hex(hash(tuple(return_path_alt)))[3:9]
-                paths.add(tuple(return_path_alt))
 
     used_nodes = set()
     for path in paths:
