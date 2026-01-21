@@ -496,18 +496,25 @@ async def graph_traceroute(request):
     forward_complete = False
     return_complete = False
 
-    # Analyze paths
+    # Analyze paths - check if ANY path completed in each direction
     for path in paths:
-        if path[0] == packet.from_node_id:
-            # Forward path (starts from source)
+        # Check forward direction (packet.from_node_id → packet.to_node_id)
+        if path[0] == packet.from_node_id and path[-1] == packet.to_node_id:
+            forward_complete = True
             if not forward_path_nodes or len(path) > len(forward_path_nodes):
                 forward_path_nodes = list(path)
-                forward_complete = path[-1] == packet.to_node_id
-        elif path[0] == packet.to_node_id:
-            # Return path (starts from destination)
+        elif path[0] == packet.from_node_id and not forward_path_nodes:
+            # Incomplete forward path, use if we don't have a complete one
+            forward_path_nodes = list(path)
+
+        # Check return direction (packet.to_node_id → packet.from_node_id)
+        if path[0] == packet.to_node_id and path[-1] == packet.from_node_id:
+            return_complete = True
             if not return_path_nodes or len(path) > len(return_path_nodes):
                 return_path_nodes = list(path)
-                return_complete = path[-1] == packet.from_node_id
+        elif path[0] == packet.to_node_id and not return_path_nodes:
+            # Incomplete return path, use if we don't have a complete one
+            return_path_nodes = list(path)
 
     # Convert node IDs to names for display
     async def get_node_name(node_id):
