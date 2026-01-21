@@ -522,25 +522,37 @@ async def graph_traceroute(request):
     forward_complete = False
     return_complete = False
 
+    # CRITICAL: Check if ANY traceroute has done=True
+    # The done flag means the full round-trip completed (both forward and return)
+    has_done = any(tr.done for tr in traceroutes)
+    if has_done:
+        # If done=True exists, both directions completed successfully
+        forward_complete = True
+        return_complete = True
+
     # Analyze paths relative to the INITIATOR (not current packet)
     for path in paths:
         # Forward direction: initiator → target
-        if path[0] == initiator_id and path[-1] == target_id:
-            forward_complete = True
-            if not forward_path_nodes or len(path) > len(forward_path_nodes):
+        if path[0] == initiator_id:
+            if path[-1] == target_id:
+                # Path reaches target - definitely complete
+                forward_complete = True
+                if not forward_path_nodes or len(path) > len(forward_path_nodes):
+                    forward_path_nodes = list(path)
+            elif not forward_path_nodes:
+                # Incomplete forward path, use if we don't have one yet
                 forward_path_nodes = list(path)
-        elif path[0] == initiator_id and not forward_path_nodes:
-            # Incomplete forward path
-            forward_path_nodes = list(path)
 
         # Return direction: target → initiator
-        if path[0] == target_id and path[-1] == initiator_id:
-            return_complete = True
-            if not return_path_nodes or len(path) > len(return_path_nodes):
+        if path[0] == target_id:
+            if path[-1] == initiator_id:
+                # Path reaches initiator - definitely complete
+                return_complete = True
+                if not return_path_nodes or len(path) > len(return_path_nodes):
+                    return_path_nodes = list(path)
+            elif not return_path_nodes:
+                # Incomplete return path, use if we don't have one yet
                 return_path_nodes = list(path)
-        elif path[0] == target_id and not return_path_nodes:
-            # Incomplete return path
-            return_path_nodes = list(path)
 
     # Convert node IDs to names for display
     async def get_node_name(node_id):
