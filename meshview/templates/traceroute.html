@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+
+{% block title %}Traceroute - Packet {{ packet_id }}{% endblock %}
+
+{% block css %}
+{{ super() }}
+<style>
+.traceroute-container {
+    padding: 20px;
+    max-width: 100%;
+    margin: 0 auto;
+}
+
+.info-bar {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #1e1f22;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    color: #ddd;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.9em;
+}
+
+.info-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.info-item strong {
+    color: #9ecbff;
+}
+
+.graph-panel {
+    overflow-x: auto;
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.graph-panel svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.detail-card {
+    background: #1e1f22;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    padding: 15px;
+    color: #ddd;
+    font-family: "JetBrains Mono", monospace;
+}
+
+.detail-card h4 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    color: #e2e6ea;
+    font-size: 1em;
+    border-bottom: 2px solid #3a3a3a;
+    padding-bottom: 8px;
+}
+
+.status {
+    display: inline-block;
+    padding: 5px 12px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.status.complete {
+    background: #0d6832;
+    color: #7ee787;
+}
+
+.status.incomplete {
+    background: #6e3c00;
+    color: #ffb366;
+}
+
+.status.asymmetric {
+    background: #6e3c00;
+    color: #ffb366;
+}
+
+.status.symmetric {
+    background: #0d6832;
+    color: #7ee787;
+}
+
+.related-packets-list {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.related-packet {
+    background: #2a2b2f;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid #3a3a3a;
+}
+
+.related-packet a {
+    color: #4da6ff;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.related-packet a:hover {
+    text-decoration: underline;
+    color: #6bb6ff;
+}
+
+.path-direction {
+    font-size: 0.85em;
+    color: #888;
+    margin-right: 5px;
+}
+
+.legend {
+    background: #2a2b2f;
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    margin-top: 15px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin: 5px 0;
+}
+
+.legend-box {
+    width: 20px;
+    height: 14px;
+    border: 2px solid #888;
+    margin-right: 8px;
+    flex-shrink: 0;
+}
+
+.legend-box.filled {
+    background: #4da6ff;
+}
+
+.legend-box.solid {
+    background: white;
+}
+
+.legend-box.dashed {
+    background: repeating-linear-gradient(
+        45deg,
+        transparent,
+        transparent 3px,
+        #888 3px,
+        #888 6px
+    );
+}
+
+@media (max-width: 768px) {
+    .info-bar {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .details-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="traceroute-container">
+
+    <!-- Info Bar at Top -->
+    <div class="info-bar">
+        <div class="info-item">
+            <strong>Packet:</strong>
+            <a href="/packet/{{ packet_id }}" style="color: #4da6ff;">{{ packet_id }}</a>
+        </div>
+        <div class="info-item">
+            <strong>From:</strong> {{ from_node_name }}
+        </div>
+        <div class="info-item">
+            <strong>To:</strong> {{ to_node_name }}
+        </div>
+        {% if routing_status %}
+        <div class="info-item">
+            <span class="status {{ routing_status.class }}">{{ routing_status.text }}</span>
+        </div>
+        {% endif %}
+        {% if forward_path %}
+        <div class="info-item">
+            <strong>Forward:</strong>
+            <span class="status {{ 'complete' if forward_complete else 'incomplete' }}">
+                {{ 'Complete' if forward_complete else 'Incomplete' }}
+            </span>
+        </div>
+        {% endif %}
+        {% if return_path %}
+        <div class="info-item">
+            <strong>Return:</strong>
+            <span class="status {{ 'complete' if return_complete else 'incomplete' }}">
+                {{ 'Complete' if return_complete else 'Incomplete' }}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Main Graph -->
+    <div class="graph-panel">
+        {{ graph_svg|safe }}
+    </div>
+
+    <!-- Details Grid Below Graph -->
+    <div class="details-grid">
+
+        {% if related_packets %}
+        <div class="detail-card">
+            <h4>🔗 Related Packets</h4>
+            <div class="related-packets-list">
+                {% for pkt in related_packets %}
+                <div class="related-packet">
+                    <span class="path-direction">{{ pkt.direction }}:</span>
+                    <a href="/packet/{{ pkt.id }}">{{ pkt.id }}</a>
+                    <span style="color: #666; margin: 0 5px;">|</span>
+                    <a href="/graph/traceroute/{{ pkt.id }}" style="font-size: 0.85em;">traceroute</a>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="detail-card">
+            <h4>📖 Graph Legend</h4>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-box filled"></div>
+                    <span>Destination (completed)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box solid"></div>
+                    <span>Intermediate node</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box dashed"></div>
+                    <span>Incomplete path</span>
+                </div>
+                <div class="legend-item">
+                    <div style="width: 20px; height: 14px; border: 2px solid #888; background: repeating-linear-gradient(135deg, transparent, transparent 2px, #888 2px, #888 4px); margin-right: 8px;"></div>
+                    <span>Sent reply</span>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+</div>
+{% endblock %}

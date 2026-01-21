@@ -324,6 +324,24 @@ async def graph_traceroute(request):
             status=404,
         )
 
+    # Find related packets (request/response pairs)
+    related_packets = []
+    if packet.from_node_id and packet.to_node_id:
+        # Find packets with swapped from/to
+        related = await store.get_packets(
+            from_node_id=packet.to_node_id,
+            to_node_id=packet.from_node_id,
+            portnum=70,  # TRACEROUTE_APP
+            limit=10
+        )
+        for rel_pkt in related:
+            if rel_pkt.id != packet_id:
+                direction = "Response Packet" if rel_pkt.from_node_id == packet.to_node_id else "Request Packet"
+                related_packets.append({
+                    'id': rel_pkt.id,
+                    'direction': direction
+                })
+
     node_ids = set()
     for tr in traceroutes:
         route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
@@ -441,12 +459,81 @@ async def graph_traceroute(request):
 
     for path in paths:
         color = '#' + hex(hash(tuple(path)))[3:9]
-        for src, dest in zip(path, path[1:], strict=False):
-            graph.add_edge(pydot.Edge(src, dest, color=color))
+        for src, dest_node in zip(path, path[1:], strict=False):
+            graph.add_edge(pydot.Edge(src, dest_node, color=color))
+
+    # Build route analysis data
+    forward_path_nodes = []
+    return_path_nodes = []
+    forward_complete = False
+    return_complete = False
+
+    # Analyze paths
+    for path in paths:
+        if path[0] == packet.from_node_id:
+            # Forward path (starts from source)
+            if not forward_path_nodes or len(path) > len(forward_path_nodes):
+                forward_path_nodes = list(path)
+                forward_complete = path[-1] == packet.to_node_id
+        elif path[0] == packet.to_node_id:
+            # Return path (starts from destination)
+            if not return_path_nodes or len(path) > len(return_path_nodes):
+                return_path_nodes = list(path)
+                return_complete = path[-1] == packet.from_node_id
+
+    # Convert node IDs to names for display
+    async def get_node_name(node_id):
+        node = await nodes.get(node_id)
+        if node:
+            return f"{node.short_name or node.long_name or node_id_to_hex(node_id)}"
+        return node_id_to_hex(node_id)
+
+    forward_path_display = []
+    for node_id in forward_path_nodes:
+        forward_path_display.append(await get_node_name(node_id))
+
+    return_path_display = []
+    for node_id in return_path_nodes:
+        return_path_display.append(await get_node_name(node_id))
+
+    # Determine routing status
+    routing_status = None
+    if forward_path_nodes and return_path_nodes:
+        # Check if paths are the same (symmetric)
+        forward_reversed = list(reversed(forward_path_nodes))
+        if forward_reversed == return_path_nodes:
+            routing_status = {'class': 'symmetric', 'text': 'SYMMETRIC ROUTING'}
+        else:
+            routing_status = {'class': 'asymmetric', 'text': 'ASYMMETRIC ROUTING'}
+    elif forward_path_nodes and not return_path_nodes:
+        routing_status = {'class': 'incomplete', 'text': 'NO RETURN PATH'}
+    elif return_path_nodes and not forward_path_nodes:
+        routing_status = {'class': 'incomplete', 'text': 'RETURN PATH ONLY'}
+
+    # Get node names for packet info
+    from_node = await nodes.get(packet.from_node_id)
+    to_node = await nodes.get(packet.to_node_id)
+    from_node_name = from_node.long_name if from_node else node_id_to_hex(packet.from_node_id)
+    to_node_name = to_node.long_name if to_node else node_id_to_hex(packet.to_node_id)
+
+    # Render template with analysis
+    template = env.get_template('traceroute.html')
+    html = template.render(
+        packet_id=packet_id,
+        from_node_name=from_node_name,
+        to_node_name=to_node_name,
+        graph_svg=graph.create_svg().decode('utf-8'),
+        forward_path=forward_path_display if forward_path_display else None,
+        return_path=return_path_display if return_path_display else None,
+        forward_complete=forward_complete,
+        return_complete=return_complete,
+        routing_status=routing_status,
+        related_packets=related_packets if related_packets else None
+    )
 
     return web.Response(
-        body=graph.create_svg(),
-        content_type="image/svg+xml",
+        body=html,
+        content_type="text/html",
     )
 
 
