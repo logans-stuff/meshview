@@ -728,6 +728,13 @@ async def api_traceroute(request):
         forward_list = list(route.route)
         reverse_list = list(route.route_back)
 
+        # Also check route_return field for additional return path data
+        if tr.route_return:
+            route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
+            if route_return and hasattr(route_return, 'route') and route_return.route:
+                # If route_return has data, use it (it may be more complete)
+                reverse_list = list(route_return.route)
+
         tr_groups.append(
             {
                 "index": idx,
