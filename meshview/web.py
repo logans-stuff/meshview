@@ -390,6 +390,8 @@ async def graph_traceroute(request):
     saw_reply = set()
     dest = None
     node_seen_time = {}
+
+    # Track which packet each traceroute belongs to
     for tr in traceroutes:
         if tr.done:
             saw_reply.add(tr.gateway_node_id)
@@ -397,12 +399,22 @@ async def graph_traceroute(request):
             continue
         route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
 
-        # Process forward path
-        path = [packet.from_node_id]
+        # Determine which packet this traceroute is for
+        # If it's from a related packet, the path direction is different
+        tr_packet = await store.get_packet(tr.packet_id)
+        if not tr_packet:
+            continue
+
+        # Use the traceroute's packet's from/to nodes, not the current packet's
+        path_start = tr_packet.from_node_id
+        path_end = tr_packet.to_node_id
+
+        # Process forward path (from traceroute's perspective)
+        path = [path_start]
         path.extend(route.route)
         if tr.done:
-            dest = packet.to_node_id
-            path.append(packet.to_node_id)
+            dest = path_end
+            path.append(path_end)
         elif path[-1] != tr.gateway_node_id:
             # It seems some nodes add them self to the list before uplinking
             path.append(tr.gateway_node_id)
@@ -416,9 +428,9 @@ async def graph_traceroute(request):
 
         # Process return path (route_back) - direction is reversed
         if hasattr(route, 'route_back') and route.route_back:
-            return_path = [packet.to_node_id]  # Start from destination
+            return_path = [path_end]  # Start from destination
             return_path.extend(route.route_back)
-            return_path.append(packet.from_node_id)  # End at source
+            return_path.append(path_start)  # End at source
             node_color[return_path[-1]] = '#' + hex(hash(tuple(return_path)))[3:9]
             paths.add(tuple(return_path))
 
@@ -426,9 +438,9 @@ async def graph_traceroute(request):
         if tr.route_return:
             route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
             if route_return and hasattr(route_return, 'route'):
-                return_path_alt = [packet.to_node_id]  # Start from destination
+                return_path_alt = [path_end]  # Start from destination
                 return_path_alt.extend(route_return.route)
-                return_path_alt.append(packet.from_node_id)  # End at source
+                return_path_alt.append(path_start)  # End at source
                 node_color[return_path_alt[-1]] = '#' + hex(hash(tuple(return_path_alt)))[3:9]
                 paths.add(tuple(return_path_alt))
 
