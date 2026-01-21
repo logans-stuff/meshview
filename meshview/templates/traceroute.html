@@ -6,16 +6,41 @@
 {{ super() }}
 <style>
 .traceroute-container {
-    display: flex;
-    gap: 20px;
     padding: 20px;
     max-width: 100%;
+    margin: 0 auto;
+}
+
+.info-bar {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #1e1f22;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    color: #ddd;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.9em;
+}
+
+.info-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.info-item strong {
+    color: #9ecbff;
 }
 
 .graph-panel {
-    flex: 1;
-    min-width: 0;
     overflow-x: auto;
+    background: white;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
 }
 
 .graph-panel svg {
@@ -23,49 +48,38 @@
     height: auto;
 }
 
-.analysis-panel {
-    width: 400px;
-    min-width: 400px;
+.details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.detail-card {
     background: #1e1f22;
     border: 1px solid #3a3a3a;
-    border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 0 20px rgba(0,0,0,0.35);
-    height: fit-content;
-    position: sticky;
-    top: 20px;
+    border-radius: 8px;
+    padding: 15px;
     color: #ddd;
     font-family: "JetBrains Mono", monospace;
 }
 
-.analysis-panel h3 {
+.detail-card h4 {
     margin-top: 0;
+    margin-bottom: 10px;
     color: #e2e6ea;
-    font-size: 1.2em;
+    font-size: 1em;
     border-bottom: 2px solid #3a3a3a;
-    padding-bottom: 10px;
-    margin-bottom: 15px;
+    padding-bottom: 8px;
 }
 
-.route-info {
-    margin-bottom: 20px;
-}
-
-.route-info h4 {
-    font-size: 0.95em;
-    color: #9ecbff;
-    margin: 10px 0 5px 0;
-    text-transform: uppercase;
-    font-weight: 600;
-}
-
-.route-info .status {
+.status {
     display: inline-block;
-    padding: 4px 10px;
+    padding: 5px 12px;
     border-radius: 4px;
     font-size: 0.85em;
-    font-weight: 600;
-    margin: 5px 0;
+    font-weight: 700;
+    text-transform: uppercase;
 }
 
 .status.complete {
@@ -88,33 +102,18 @@
     color: #7ee787;
 }
 
-.path-list {
-    background: #2a2b2f;
-    padding: 12px;
-    border-radius: 6px;
-    font-size: 0.85em;
-    margin: 8px 0;
-    border-left: 3px solid #4da6ff;
-}
-
-.path-list.return-path {
-    border-left-color: #ff8c00;
-}
-
-.path-list .hop {
-    padding: 3px 0;
-}
-
-.path-list .arrow {
-    color: #4da6ff;
-    margin: 0 5px;
+.related-packets-list {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
 }
 
 .related-packet {
     background: #2a2b2f;
-    padding: 12px;
+    padding: 8px 12px;
     border-radius: 6px;
-    margin: 8px 0;
+    border: 1px solid #3a3a3a;
 }
 
 .related-packet a {
@@ -125,13 +124,13 @@
 
 .related-packet a:hover {
     text-decoration: underline;
+    color: #6bb6ff;
 }
 
-.related-packet .label {
-    color: #9ecbff;
+.path-direction {
     font-size: 0.85em;
-    display: block;
-    margin-bottom: 5px;
+    color: #888;
+    margin-right: 5px;
 }
 
 .legend {
@@ -174,15 +173,14 @@
     );
 }
 
-@media (max-width: 1200px) {
-    .traceroute-container {
+@media (max-width: 768px) {
+    .info-bar {
         flex-direction: column;
+        gap: 10px;
     }
-    .analysis-panel {
-        width: 100%;
-        min-width: 0;
-        position: relative;
-        top: 0;
+
+    .details-grid {
+        grid-template-columns: 1fr;
     }
 }
 </style>
@@ -190,96 +188,87 @@
 
 {% block body %}
 <div class="traceroute-container">
+
+    <!-- Info Bar at Top -->
+    <div class="info-bar">
+        <div class="info-item">
+            <strong>Packet:</strong>
+            <a href="/packet/{{ packet_id }}" style="color: #4da6ff;">{{ packet_id }}</a>
+        </div>
+        <div class="info-item">
+            <strong>From:</strong> {{ from_node_name }}
+        </div>
+        <div class="info-item">
+            <strong>To:</strong> {{ to_node_name }}
+        </div>
+        {% if routing_status %}
+        <div class="info-item">
+            <span class="status {{ routing_status.class }}">{{ routing_status.text }}</span>
+        </div>
+        {% endif %}
+        {% if forward_path %}
+        <div class="info-item">
+            <strong>Forward:</strong>
+            <span class="status {{ 'complete' if forward_complete else 'incomplete' }}">
+                {{ 'Complete' if forward_complete else 'Incomplete' }}
+            </span>
+        </div>
+        {% endif %}
+        {% if return_path %}
+        <div class="info-item">
+            <strong>Return:</strong>
+            <span class="status {{ 'complete' if return_complete else 'incomplete' }}">
+                {{ 'Complete' if return_complete else 'Incomplete' }}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Main Graph -->
     <div class="graph-panel">
         {{ graph_svg|safe }}
     </div>
 
-    <div class="analysis-panel">
-        <h3>📊 Route Analysis</h3>
-
-        <div class="route-info">
-            <h4>Packet Information</h4>
-            <div style="font-size: 0.9em;">
-                <strong>ID:</strong> <a href="/packet/{{ packet_id }}" style="color: #4da6ff;">{{ packet_id }}</a><br>
-                <strong>From:</strong> {{ from_node_name }}<br>
-                <strong>To:</strong> {{ to_node_name }}
-            </div>
-        </div>
-
-        {% if routing_status %}
-        <div class="route-info">
-            <h4>Routing Status</h4>
-            <span class="status {{ routing_status.class }}">{{ routing_status.text }}</span>
-        </div>
-        {% endif %}
-
-        {% if forward_path %}
-        <div class="route-info">
-            <h4>Forward Path</h4>
-            <span class="status {{ 'complete' if forward_complete else 'incomplete' }}">
-                {{ 'COMPLETED' if forward_complete else 'INCOMPLETE' }}
-            </span>
-            <div class="path-list">
-                {% for hop in forward_path %}
-                <div class="hop">
-                    {% if not loop.first %}<span class="arrow">→</span>{% endif %}
-                    {{ hop }}
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-
-        {% if return_path %}
-        <div class="route-info">
-            <h4>Return Path</h4>
-            <span class="status {{ 'complete' if return_complete else 'incomplete' }}">
-                {{ 'COMPLETED' if return_complete else 'INCOMPLETE' }}
-            </span>
-            <div class="path-list return-path">
-                {% for hop in return_path %}
-                <div class="hop">
-                    {% if not loop.first %}<span class="arrow">→</span>{% endif %}
-                    {{ hop }}
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
+    <!-- Details Grid Below Graph -->
+    <div class="details-grid">
 
         {% if related_packets %}
-        <div class="route-info">
-            <h4>Related Packets</h4>
-            {% for pkt in related_packets %}
-            <div class="related-packet">
-                <span class="label">{{ pkt.direction }}</span>
-                <a href="/graph/traceroute/{{ pkt.id }}" target="_blank">
-                    Packet {{ pkt.id }}
-                </a>
+        <div class="detail-card">
+            <h4>🔗 Related Packets</h4>
+            <div class="related-packets-list">
+                {% for pkt in related_packets %}
+                <div class="related-packet">
+                    <span class="path-direction">{{ pkt.direction }}:</span>
+                    <a href="/graph/traceroute/{{ pkt.id }}">{{ pkt.id }}</a>
+                </div>
+                {% endfor %}
             </div>
-            {% endfor %}
         </div>
         {% endif %}
 
-        <div class="legend">
-            <strong style="display: block; margin-bottom: 8px;">Graph Legend:</strong>
-            <div class="legend-item">
-                <div class="legend-box filled"></div>
-                <span>Destination (completed)</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-box solid"></div>
-                <span>Intermediate node</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-box dashed"></div>
-                <span>Incomplete path</span>
-            </div>
-            <div class="legend-item">
-                <div style="width: 20px; height: 14px; border: 2px solid #888; background: repeating-linear-gradient(135deg, transparent, transparent 2px, #888 2px, #888 4px); margin-right: 8px;"></div>
-                <span>Sent reply</span>
+        <div class="detail-card">
+            <h4>📖 Graph Legend</h4>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-box filled"></div>
+                    <span>Destination (completed)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box solid"></div>
+                    <span>Intermediate node</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box dashed"></div>
+                    <span>Incomplete path</span>
+                </div>
+                <div class="legend-item">
+                    <div style="width: 20px; height: 14px; border: 2px solid #888; background: repeating-linear-gradient(135deg, transparent, transparent 2px, #888 2px, #888 4px); margin-right: 8px;"></div>
+                    <span>Sent reply</span>
+                </div>
             </div>
         </div>
+
     </div>
+
 </div>
 {% endblock %}
