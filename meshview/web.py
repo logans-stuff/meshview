@@ -615,6 +615,148 @@ async def graph_traceroute(request):
     )
 
 
+@routes.get("/graph/traceroute/{packet_id}/svg")
+async def graph_traceroute_svg(request):
+    """Return just the SVG graph for full-screen viewing"""
+    packet_id = int(request.match_info['packet_id'])
+    traceroutes = list(await store.get_traceroute(packet_id))
+
+    packet = await store.get_packet(packet_id)
+    if not packet:
+        return web.Response(
+            status=404,
+        )
+
+    # Build graph (reuse same logic but only return SVG)
+    node_ids = set()
+    for tr in traceroutes:
+        route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+        node_ids.add(tr.gateway_node_id)
+        for node_id in route.route:
+            node_ids.add(node_id)
+        if hasattr(route, 'route_back'):
+            for node_id in route.route_back:
+                node_ids.add(node_id)
+        if tr.route_return:
+            route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
+            if route_return and hasattr(route_return, 'route'):
+                for node_id in route_return.route:
+                    node_ids.add(node_id)
+    node_ids.add(packet.from_node_id)
+    node_ids.add(packet.to_node_id)
+
+    nodes = {}
+    async with asyncio.TaskGroup() as tg:
+        for node_id in node_ids:
+            nodes[node_id] = tg.create_task(store.get_node(node_id))
+
+    graph = pydot.Dot('traceroute', graph_type="digraph")
+
+    paths = set()
+    node_color = {}
+    mqtt_nodes = set()
+    saw_reply = set()
+    dest = None
+    node_seen_time = {}
+
+    for tr in traceroutes:
+        if tr.done:
+            saw_reply.add(tr.gateway_node_id)
+        if tr.done and dest:
+            continue
+        route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+
+        tr_packet = await store.get_packet(tr.packet_id)
+        if not tr_packet:
+            continue
+
+        path_start = tr_packet.from_node_id
+        path_end = tr_packet.to_node_id
+
+        path = [path_start]
+        path.extend(route.route)
+        if tr.done:
+            dest = path_end
+            path.append(path_end)
+        elif path[-1] != tr.gateway_node_id:
+            path.append(tr.gateway_node_id)
+
+        if not tr.done and tr.gateway_node_id not in node_seen_time and tr.import_time_us:
+            node_seen_time[path[-1]] = tr.import_time_us
+
+        mqtt_nodes.add(tr.gateway_node_id)
+        node_color[path[-1]] = '#' + hex(hash(tuple(path)))[3:9]
+        paths.add(tuple(path))
+
+        if hasattr(route, 'route_back') and route.route_back:
+            return_path = [path_end]
+            return_path.extend(route.route_back)
+            return_path.append(path_start)
+            node_color[return_path[-1]] = '#' + hex(hash(tuple(return_path)))[3:9]
+            paths.add(tuple(return_path))
+
+        if tr.route_return:
+            route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
+            if route_return and hasattr(route_return, 'route'):
+                return_path_alt = [path_end]
+                return_path_alt.extend(route_return.route)
+                return_path_alt.append(path_start)
+                node_color[return_path_alt[-1]] = '#' + hex(hash(tuple(return_path_alt)))[3:9]
+                paths.add(tuple(return_path_alt))
+
+    used_nodes = set()
+    for path in paths:
+        used_nodes.update(path)
+
+    import_times = [tr.import_time_us for tr in traceroutes if tr.import_time_us]
+    if import_times:
+        first_time = min(import_times)
+    else:
+        first_time = 0
+
+    for node_id in used_nodes:
+        node = await nodes[node_id]
+        if not node:
+            node_name = node_id_to_hex(node_id)
+        else:
+            node_name = (
+                f'[{node.short_name}] {node.long_name}\n{node_id_to_hex(node_id)}\n{node.role}'
+            )
+        if node_id in node_seen_time:
+            ms = (node_seen_time[node_id] - first_time) / 1000
+            node_name += f'\n {ms:.2f}ms'
+        style = 'dashed'
+        if node_id == dest:
+            style = 'filled'
+        elif node_id in mqtt_nodes:
+            style = 'solid'
+
+        if node_id in saw_reply:
+            style += ', diagonals'
+
+        graph.add_node(
+            pydot.Node(
+                str(node_id),
+                label=node_name,
+                shape='box',
+                color=node_color.get(node_id, 'black'),
+                style=style,
+                href=f"/node/{node_id}",
+            )
+        )
+
+    for path in paths:
+        color = '#' + hex(hash(tuple(path)))[3:9]
+        for src, dest_node in zip(path, path[1:], strict=False):
+            graph.add_edge(pydot.Edge(src, dest_node, color=color))
+
+    # Return just the SVG
+    return web.Response(
+        body=graph.create_svg(),
+        content_type="image/svg+xml",
+    )
+
+
 async def run_server():
     """Start the aiohttp web server after migrations are complete."""
     # Wait for database migrations to complete before starting web server
