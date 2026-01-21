@@ -132,14 +132,13 @@ async def has_packets(node_id, portnum):
 
 async def get_traceroute(packet_id):
     """
-    Get traceroutes for a packet. If none found, search for related packets
-    (packets with swapped from/to nodes) which may have the traceroute data.
+    Get traceroutes for a packet and related packets (request/response pairs).
 
-    This handles the case where traceroute data is stored on the response packet
-    but the user is querying the original request packet.
+    Returns traceroutes from both the current packet and any related packets
+    with swapped from/to nodes, allowing proper detection of bidirectional paths.
     """
     async with database.async_session() as session:
-        # First, try direct lookup
+        # Get direct traceroutes for this packet
         result = await session.execute(
             select(Traceroute)
             .where(Traceroute.packet_id == packet_id)
@@ -147,37 +146,46 @@ async def get_traceroute(packet_id):
         )
         traceroutes = list(result.scalars())
 
-        # If no traceroutes found, look for related packets with swapped from/to
-        if not traceroutes:
-            # Get the original packet to find its from/to nodes
-            packet_result = await session.execute(
-                select(Packet).where(Packet.id == packet_id)
-            )
-            packet = packet_result.scalar_one_or_none()
+        # Always look for related packets (request/response pairs)
+        # Get the original packet to find its from/to nodes
+        packet_result = await session.execute(
+            select(Packet).where(Packet.id == packet_id)
+        )
+        packet = packet_result.scalar_one_or_none()
 
-            if packet and packet.from_node_id and packet.to_node_id:
-                # Find packets with swapped from/to and same portnum
-                related_packets = await session.execute(
-                    select(Packet.id)
-                    .where(
-                        and_(
-                            Packet.from_node_id == packet.to_node_id,
-                            Packet.to_node_id == packet.from_node_id,
-                            Packet.portnum == 70  # TRACEROUTE_APP
-                        )
+        if packet and packet.from_node_id and packet.to_node_id:
+            # Find packets with swapped from/to within time window
+            time_window_us = 5 * 60 * 1_000_000  # 5 minutes
+            time_start = packet.import_time_us - time_window_us if packet.import_time_us else 0
+            time_end = packet.import_time_us + time_window_us if packet.import_time_us else 2**63 - 1
+
+            related_packets = await session.execute(
+                select(Packet.id)
+                .where(
+                    and_(
+                        Packet.from_node_id == packet.to_node_id,
+                        Packet.to_node_id == packet.from_node_id,
+                        Packet.portnum == 70,  # TRACEROUTE_APP
+                        Packet.id != packet_id,  # Exclude self
+                        Packet.import_time_us >= time_start,
+                        Packet.import_time_us <= time_end
                     )
-                    .order_by(Packet.import_time_us)
                 )
-                related_packet_ids = [row[0] for row in related_packets]
+                .order_by(Packet.import_time_us)
+                .limit(5)  # Limit to most recent related packets
+            )
+            related_packet_ids = [row[0] for row in related_packets]
 
-                # Get traceroutes from related packets
-                if related_packet_ids:
-                    result = await session.execute(
-                        select(Traceroute)
-                        .where(Traceroute.packet_id.in_(related_packet_ids))
-                        .order_by(Traceroute.import_time_us)
-                    )
-                    traceroutes = list(result.scalars())
+            # Get traceroutes from related packets
+            if related_packet_ids:
+                result = await session.execute(
+                    select(Traceroute)
+                    .where(Traceroute.packet_id.in_(related_packet_ids))
+                    .order_by(Traceroute.import_time_us)
+                )
+                related_traceroutes = list(result.scalars())
+                # Combine both sets of traceroutes
+                traceroutes.extend(related_traceroutes)
 
         return iter(traceroutes)
 
