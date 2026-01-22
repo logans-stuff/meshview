@@ -154,37 +154,83 @@ async def get_traceroute(packet_id):
         packet = packet_result.scalar_one_or_none()
 
         if packet and packet.from_node_id and packet.to_node_id:
-            # Find packets with swapped from/to within time window
-            time_window_us = 5 * 60 * 1_000_000  # 5 minutes
-            time_start = packet.import_time_us - time_window_us if packet.import_time_us else 0
-            time_end = packet.import_time_us + time_window_us if packet.import_time_us else 2**63 - 1
+            # PRIMARY: Match based on route overlap, not timestamps
+            # Get our packet's route nodes to compare
+            from meshview.decode_payload import decode_payload
+            from meshtastic.protobuf.portnums_pb2 import PortNum
 
+            our_route_nodes = set()
+            for tr in traceroutes:
+                route = decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+                if route:
+                    our_route_nodes.update(route.route)
+                    if hasattr(route, 'route_back'):
+                        our_route_nodes.update(route.route_back)
+
+            # Find ALL candidates with swapped from/to
             related_packets = await session.execute(
-                select(Packet.id)
+                select(Packet.id, Packet.import_time_us)
                 .where(
                     and_(
                         Packet.from_node_id == packet.to_node_id,
                         Packet.to_node_id == packet.from_node_id,
                         Packet.portnum == 70,  # TRACEROUTE_APP
-                        Packet.id != packet_id,  # Exclude self
-                        Packet.import_time_us >= time_start,
-                        Packet.import_time_us <= time_end
+                        Packet.id != packet_id  # Exclude self
                     )
                 )
-                .order_by(Packet.import_time_us)
-                .limit(5)  # Limit to most recent related packets
+                .order_by(Packet.import_time_us.desc())
+                .limit(20)  # Get more candidates to compare routes
             )
-            related_packet_ids = [row[0] for row in related_packets]
+            candidates = [(row[0], row[1]) for row in related_packets]
 
-            # Get traceroutes from related packets
-            if related_packet_ids:
+            best_match_id = None
+            best_overlap_score = 0
+
+            # Compare route overlap for each candidate
+            if candidates and our_route_nodes:
+                for candidate_id, candidate_time in candidates:
+                    # Get candidate's traceroutes
+                    candidate_trs = await session.execute(
+                        select(Traceroute)
+                        .where(Traceroute.packet_id == candidate_id)
+                    )
+                    candidate_route_nodes = set()
+                    for tr in candidate_trs.scalars():
+                        route = decode_payload(PortNum.TRACEROUTE_APP, tr.route)
+                        if route:
+                            candidate_route_nodes.update(route.route)
+                            if hasattr(route, 'route_back'):
+                                candidate_route_nodes.update(route.route_back)
+
+                    # Calculate overlap
+                    if candidate_route_nodes:
+                        overlap = len(our_route_nodes & candidate_route_nodes)
+                        if overlap > best_overlap_score:
+                            best_overlap_score = overlap
+                            best_match_id = candidate_id
+
+            # FALLBACK: If no route overlap found, use timestamp proximity
+            if not best_match_id and candidates and packet.import_time_us:
+                # Use 60 second window for timestamp fallback
+                time_window_us = 60 * 1_000_000
+                within_window = [
+                    (cid, ctime) for cid, ctime in candidates
+                    if abs(ctime - packet.import_time_us) <= time_window_us
+                ]
+                if within_window:
+                    best_match_id = min(
+                        within_window,
+                        key=lambda x: abs(x[1] - packet.import_time_us)
+                    )[0]
+
+            # Get traceroutes from best match only
+            if best_match_id:
                 result = await session.execute(
                     select(Traceroute)
-                    .where(Traceroute.packet_id.in_(related_packet_ids))
+                    .where(Traceroute.packet_id == best_match_id)
                     .order_by(Traceroute.import_time_us)
                 )
                 related_traceroutes = list(result.scalars())
-                # Combine both sets of traceroutes
                 traceroutes.extend(related_traceroutes)
 
         return iter(traceroutes)

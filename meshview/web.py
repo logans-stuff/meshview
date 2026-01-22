@@ -382,6 +382,23 @@ async def graph_traceroute(request):
         for node_id in node_ids:
             nodes[node_id] = tg.create_task(store.get_node(node_id))
 
+    # FIRST: Determine the initiator before building the graph
+    initiator_id = None
+    target_id = None
+    for tr in traceroutes:
+        tr_packet = await store.get_packet(tr.packet_id)
+        if tr_packet:
+            if not tr.done:
+                initiator_id = tr_packet.from_node_id
+                target_id = tr_packet.to_node_id
+                break
+            elif tr.done and not initiator_id:
+                initiator_id = tr_packet.to_node_id
+                target_id = tr_packet.from_node_id
+    if not initiator_id:
+        initiator_id = packet.from_node_id
+        target_id = packet.to_node_id
+
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
     paths = set()
@@ -465,9 +482,12 @@ async def graph_traceroute(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
+        # Style priority: dest > initiator > gateways > others
         style = 'dashed'
         if node_id == dest:
             style = 'filled'
+        elif node_id == initiator_id:
+            style = 'bold,solid'  # Mark initiator with bold solid
         elif node_id in mqtt_nodes:
             style = 'solid'
 
@@ -650,6 +670,23 @@ async def graph_traceroute_svg(request):
         for node_id in node_ids:
             nodes[node_id] = tg.create_task(store.get_node(node_id))
 
+    # FIRST: Determine the initiator before building the graph
+    initiator_id = None
+    target_id = None
+    for tr in traceroutes:
+        tr_packet = await store.get_packet(tr.packet_id)
+        if tr_packet:
+            if not tr.done:
+                initiator_id = tr_packet.from_node_id
+                target_id = tr_packet.to_node_id
+                break
+            elif tr.done and not initiator_id:
+                initiator_id = tr_packet.to_node_id
+                target_id = tr_packet.from_node_id
+    if not initiator_id:
+        initiator_id = packet.from_node_id
+        target_id = packet.to_node_id
+
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
     paths = set()
@@ -725,9 +762,12 @@ async def graph_traceroute_svg(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
+        # Style priority: dest > initiator > gateways > others
         style = 'dashed'
         if node_id == dest:
             style = 'filled'
+        elif node_id == initiator_id:
+            style = 'bold,solid'  # Mark initiator with bold solid
         elif node_id in mqtt_nodes:
             style = 'solid'
 
