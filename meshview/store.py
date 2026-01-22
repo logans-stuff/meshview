@@ -215,7 +215,7 @@ async def get_traceroute(packet_id):
                 time_window_us = 60 * 1_000_000
                 within_window = [
                     (cid, ctime) for cid, ctime in candidates
-                    if abs(ctime - packet.import_time_us) <= time_window_us
+                    if ctime is not None and abs(ctime - packet.import_time_us) <= time_window_us
                 ]
                 if within_window:
                     best_match_id = min(
