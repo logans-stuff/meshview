@@ -612,7 +612,7 @@ async def health_check(request):
     health_status = {
         "status": "healthy",
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
-        "version": __version__,
+        "version": get_display_version(),
         "git_revision": _git_revision_short,
     }
 
