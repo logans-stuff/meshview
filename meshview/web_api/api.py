@@ -10,7 +10,7 @@ from sqlalchemy import func, select, text
 
 from meshtastic.protobuf.portnums_pb2 import PortNum
 from meshview import database, decode_payload, store
-from meshview.__version__ import __version__, _git_revision_short, get_version_info
+from meshview.__version__ import __version__, _git_revision_short, get_version_info, get_display_version
 from meshview.config import CONFIG
 from meshview.models import Node
 from meshview.models import Packet as PacketModel
@@ -536,7 +536,7 @@ async def api_config(request):
                 site, "weekly_net_message", "Weekly Mesh check-in message."
             ),
             "net_tag": get_str(site, "net_tag", "#BayMeshNet"),
-            "version": str(__version__),
+            "version": get_display_version(),
         }
 
         # ------------------ MQTT ------------------
