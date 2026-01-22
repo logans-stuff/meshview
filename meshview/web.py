@@ -484,10 +484,12 @@ async def graph_traceroute(request):
             node_name += f'\n {ms:.2f}ms'
         # Style priority: dest > initiator > gateways > others
         style = 'dashed'
+        penwidth = 1  # Default border width
         if node_id == dest:
             style = 'filled'
         elif node_id == initiator_id:
-            style = 'bold,solid'  # Mark initiator with bold solid
+            style = 'solid'
+            penwidth = 3  # Thick border for initiator
         elif node_id in mqtt_nodes:
             style = 'solid'
 
@@ -501,6 +503,7 @@ async def graph_traceroute(request):
                 shape='box',
                 color=node_color.get(node_id, 'black'),
                 style=style,
+                penwidth=penwidth,
                 href=f"/node/{node_id}",
             )
         )
@@ -764,10 +767,12 @@ async def graph_traceroute_svg(request):
             node_name += f'\n {ms:.2f}ms'
         # Style priority: dest > initiator > gateways > others
         style = 'dashed'
+        penwidth = 1  # Default border width
         if node_id == dest:
             style = 'filled'
         elif node_id == initiator_id:
-            style = 'bold,solid'  # Mark initiator with bold solid
+            style = 'solid'
+            penwidth = 3  # Thick border for initiator
         elif node_id in mqtt_nodes:
             style = 'solid'
 
@@ -781,6 +786,7 @@ async def graph_traceroute_svg(request):
                 shape='box',
                 color=node_color.get(node_id, 'black'),
                 style=style,
+                penwidth=penwidth,
                 href=f"/node/{node_id}",
             )
         )
