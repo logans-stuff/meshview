@@ -402,6 +402,7 @@ async def graph_traceroute(request):
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
     # Bright, readable color palette (avoiding black and dark colors)
+    # 24 distinct colors to handle large traceroutes with many paths
     COLOR_PALETTE = [
         '#FF6B6B',  # Red
         '#4ECDC4',  # Teal
@@ -415,6 +416,18 @@ async def graph_traceroute(request):
         '#52C41A',  # Green
         '#FF85C0',  # Pink
         '#95E1D3',  # Aqua
+        '#FF9AA2',  # Light Coral
+        '#B5EAD7',  # Seafoam
+        '#C7CEEA',  # Lavender
+        '#FFDAC1',  # Peach
+        '#A0E7E5',  # Turquoise
+        '#FFABAB',  # Rose
+        '#FFC3A0',  # Apricot
+        '#D5AAFF',  # Light Purple
+        '#B9FBC0',  # Mint Green
+        '#FFCFDF',  # Baby Pink
+        '#97C1A9',  # Sage
+        '#FCE77D',  # Light Gold
     ]
 
     paths = set()
@@ -712,6 +725,7 @@ async def graph_traceroute_svg(request):
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
     # Bright, readable color palette (avoiding black and dark colors)
+    # 24 distinct colors to handle large traceroutes with many paths
     COLOR_PALETTE = [
         '#FF6B6B',  # Red
         '#4ECDC4',  # Teal
@@ -725,6 +739,18 @@ async def graph_traceroute_svg(request):
         '#52C41A',  # Green
         '#FF85C0',  # Pink
         '#95E1D3',  # Aqua
+        '#FF9AA2',  # Light Coral
+        '#B5EAD7',  # Seafoam
+        '#C7CEEA',  # Lavender
+        '#FFDAC1',  # Peach
+        '#A0E7E5',  # Turquoise
+        '#FFABAB',  # Rose
+        '#FFC3A0',  # Apricot
+        '#D5AAFF',  # Light Purple
+        '#B9FBC0',  # Mint Green
+        '#FFCFDF',  # Baby Pink
+        '#97C1A9',  # Sage
+        '#FCE77D',  # Light Gold
     ]
 
     paths = set()
