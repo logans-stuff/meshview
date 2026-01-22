@@ -482,10 +482,10 @@ async def graph_traceroute(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
-        # Style priority: dest > initiator > gateways > others
+        # Style priority: target > initiator > gateways > others
         style = 'dashed'
         penwidth = 1  # Default border width
-        if node_id == dest:
+        if node_id == target_id:
             style = 'filled'
         elif node_id == initiator_id:
             style = 'solid'
@@ -768,10 +768,10 @@ async def graph_traceroute_svg(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
-        # Style priority: dest > initiator > gateways > others
+        # Style priority: target > initiator > gateways > others
         style = 'dashed'
         penwidth = 1  # Default border width
-        if node_id == dest:
+        if node_id == target_id:
             style = 'filled'
         elif node_id == initiator_id:
             style = 'solid'
