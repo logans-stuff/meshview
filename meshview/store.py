@@ -154,13 +154,15 @@ async def get_traceroute(packet_id):
         packet = packet_result.scalar_one_or_none()
 
         if packet and packet.from_node_id and packet.to_node_id:
-            # Find packets with swapped from/to within time window
-            time_window_us = 5 * 60 * 1_000_000  # 5 minutes
+            # Find packets with swapped from/to within TIGHT time window
+            # Per-node traceroute limit is 30s, so 60s window catches legitimate pairs
+            # while avoiding false matches from concurrent traceroutes
+            time_window_us = 60 * 1_000_000  # 60 seconds (was 5 minutes - too broad!)
             time_start = packet.import_time_us - time_window_us if packet.import_time_us else 0
             time_end = packet.import_time_us + time_window_us if packet.import_time_us else 2**63 - 1
 
             related_packets = await session.execute(
-                select(Packet.id)
+                select(Packet.id, Packet.import_time_us)
                 .where(
                     and_(
                         Packet.from_node_id == packet.to_node_id,
@@ -172,11 +174,21 @@ async def get_traceroute(packet_id):
                     )
                 )
                 .order_by(Packet.import_time_us)
-                .limit(5)  # Limit to most recent related packets
+                .limit(10)  # Get candidates, will filter to closest
             )
-            related_packet_ids = [row[0] for row in related_packets]
+            candidates = [(row[0], row[1]) for row in related_packets]
 
-            # Get traceroutes from related packets
+            # Find the CLOSEST packet in time (most likely to be the actual pair)
+            if candidates and packet.import_time_us:
+                closest_packet_id = min(
+                    candidates,
+                    key=lambda x: abs(x[1] - packet.import_time_us)
+                )[0]
+                related_packet_ids = [closest_packet_id]
+            else:
+                related_packet_ids = [c[0] for c in candidates[:1]]  # Just take first if no timestamp
+
+            # Get traceroutes from the closest related packet only
             if related_packet_ids:
                 result = await session.execute(
                     select(Traceroute)
