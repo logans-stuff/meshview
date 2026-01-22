@@ -401,6 +401,22 @@ async def graph_traceroute(request):
 
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
+    # Bright, readable color palette (avoiding black and dark colors)
+    COLOR_PALETTE = [
+        '#FF6B6B',  # Red
+        '#4ECDC4',  # Teal
+        '#45B7D1',  # Blue
+        '#FFA07A',  # Light Salmon
+        '#98D8C8',  # Mint
+        '#F7DC6F',  # Yellow
+        '#BB8FCE',  # Purple
+        '#85C1E2',  # Sky Blue
+        '#F8B739',  # Orange
+        '#52C41A',  # Green
+        '#FF85C0',  # Pink
+        '#95E1D3',  # Aqua
+    ]
+
     paths = set()
     node_color = {}
     mqtt_nodes = set()
@@ -440,7 +456,7 @@ async def graph_traceroute(request):
             node_seen_time[path[-1]] = tr.import_time_us
 
         mqtt_nodes.add(tr.gateway_node_id)
-        node_color[path[-1]] = '#' + hex(hash(tuple(path)))[3:9]
+        node_color[path[-1]] = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
         paths.add(tuple(path))
 
         # Process return path (route_back) - direction is reversed
@@ -448,7 +464,7 @@ async def graph_traceroute(request):
             return_path = [path_end]  # Start from destination
             return_path.extend(route.route_back)
             return_path.append(path_start)  # End at source
-            node_color[return_path[-1]] = '#' + hex(hash(tuple(return_path)))[3:9]
+            node_color[return_path[-1]] = COLOR_PALETTE[hash(tuple(return_path)) % len(COLOR_PALETTE)]
             paths.add(tuple(return_path))
 
         # Process route_return field if present
@@ -458,7 +474,7 @@ async def graph_traceroute(request):
                 return_path_alt = [path_end]  # Start from destination
                 return_path_alt.extend(route_return.route)
                 return_path_alt.append(path_start)  # End at source
-                node_color[return_path_alt[-1]] = '#' + hex(hash(tuple(return_path_alt)))[3:9]
+                node_color[return_path_alt[-1]] = COLOR_PALETTE[hash(tuple(return_path_alt)) % len(COLOR_PALETTE)]
                 paths.add(tuple(return_path_alt))
 
     used_nodes = set()
@@ -504,7 +520,7 @@ async def graph_traceroute(request):
                 str(node_id),
                 label=node_name,
                 shape='box',
-                color=node_color.get(node_id, 'black'),
+                color=node_color.get(node_id, '#45B7D1'),  # Default to bright blue instead of black
                 style=style,
                 penwidth=penwidth,
                 href=f"/node/{node_id}",
@@ -512,7 +528,7 @@ async def graph_traceroute(request):
         )
 
     for path in paths:
-        color = '#' + hex(hash(tuple(path)))[3:9]
+        color = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
         for src, dest_node in zip(path, path[1:], strict=False):
             graph.add_edge(pydot.Edge(src, dest_node, color=color))
 
@@ -695,6 +711,22 @@ async def graph_traceroute_svg(request):
 
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
+    # Bright, readable color palette (avoiding black and dark colors)
+    COLOR_PALETTE = [
+        '#FF6B6B',  # Red
+        '#4ECDC4',  # Teal
+        '#45B7D1',  # Blue
+        '#FFA07A',  # Light Salmon
+        '#98D8C8',  # Mint
+        '#F7DC6F',  # Yellow
+        '#BB8FCE',  # Purple
+        '#85C1E2',  # Sky Blue
+        '#F8B739',  # Orange
+        '#52C41A',  # Green
+        '#FF85C0',  # Pink
+        '#95E1D3',  # Aqua
+    ]
+
     paths = set()
     node_color = {}
     mqtt_nodes = set()
@@ -728,7 +760,7 @@ async def graph_traceroute_svg(request):
             node_seen_time[path[-1]] = tr.import_time_us
 
         mqtt_nodes.add(tr.gateway_node_id)
-        node_color[path[-1]] = '#' + hex(hash(tuple(path)))[3:9]
+        node_color[path[-1]] = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
         paths.add(tuple(path))
 
         if hasattr(route, 'route_back') and route.route_back:
@@ -790,7 +822,7 @@ async def graph_traceroute_svg(request):
                 str(node_id),
                 label=node_name,
                 shape='box',
-                color=node_color.get(node_id, 'black'),
+                color=node_color.get(node_id, '#45B7D1'),  # Default to bright blue instead of black
                 style=style,
                 penwidth=penwidth,
                 href=f"/node/{node_id}",
@@ -798,7 +830,7 @@ async def graph_traceroute_svg(request):
         )
 
     for path in paths:
-        color = '#' + hex(hash(tuple(path)))[3:9]
+        color = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
         for src, dest_node in zip(path, path[1:], strict=False):
             graph.add_edge(pydot.Edge(src, dest_node, color=color))
 
