@@ -511,6 +511,13 @@ async def graph_traceroute(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
+
+        # Add visual indicators for initiator/destination
+        if node_id == initiator_id:
+            node_name = f'📤 {node_name}'  # Outbox for sender/initiator
+        elif node_id == target_id:
+            node_name = f'📩 {node_name}'  # Incoming envelope for destination
+
         # Style priority: target > initiator > gateways > others
         style = 'dashed'
         penwidth = 1  # Default border width
@@ -826,6 +833,13 @@ async def graph_traceroute_svg(request):
         if node_id in node_seen_time:
             ms = (node_seen_time[node_id] - first_time) / 1000
             node_name += f'\n {ms:.2f}ms'
+
+        # Add visual indicators for initiator/destination
+        if node_id == initiator_id:
+            node_name = f'📤 {node_name}'  # Outbox for sender/initiator
+        elif node_id == target_id:
+            node_name = f'📩 {node_name}'  # Incoming envelope for destination
+
         # Style priority: target > initiator > gateways > others
         style = 'dashed'
         penwidth = 1  # Default border width
