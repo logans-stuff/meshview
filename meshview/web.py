@@ -489,9 +489,12 @@ async def graph_traceroute(request):
             style = 'filled'
         elif node_id == initiator_id:
             style = 'solid'
-            penwidth = 3  # Thick border for initiator
         elif node_id in mqtt_nodes:
             style = 'solid'
+
+        # Always apply thick border to initiator, regardless of other styles
+        if node_id == initiator_id:
+            penwidth = 3
 
         if node_id in saw_reply:
             style += ', diagonals'
@@ -772,9 +775,12 @@ async def graph_traceroute_svg(request):
             style = 'filled'
         elif node_id == initiator_id:
             style = 'solid'
-            penwidth = 3  # Thick border for initiator
         elif node_id in mqtt_nodes:
             style = 'solid'
+
+        # Always apply thick border to initiator, regardless of other styles
+        if node_id == initiator_id:
+            penwidth = 3
 
         if node_id in saw_reply:
             style += ', diagonals'
