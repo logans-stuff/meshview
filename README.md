@@ -4,9 +4,12 @@
 
 The project serves as a real-time monitoring and diagnostic tool for the Meshtastic mesh network. It provides detailed insights into network activity, including message traffic, node positions, and telemetry data.
 
-### Version 3.0.3 — January 2026
-- Added database support for MySQL (not tested, would love to have someone test!) and PostgreSQL (alongside SQLite) for larger or shared deployments.
-- Configuration updated to allow selecting the database backend via connection string.
+### Version 3.0.4 — Late January 2026
+- Database: multi‑DB support, PostgreSQL scripts, WAL config for SQLite, cleanup query timing fixes, removal of import time columns, and various time‑handling fixes.
+- UI/UX: extensive updates to node.html, nodelist.html, top.html, and packet.html (paging, stats, distance, status/favorites), plus net view changes to 12‑hour window.
+- API/logic: weekly mesh query fix, node list performance improvement, backwards‑compatibility and other bug fixes.
+- MQTT reader: configurable skip‑node list and secondary decryption keys.
+- Docs/ops: multiple documentation updates, updated site list, container workflow fixes/tests, README updates.
 
 ### Version 3.0.2 — January 2026
 - Changes to the Database to will make it so that there is a need for space when updating to the latest. SQlite requires to rebuild the database when droping a column. ( we are droping some of the old columns) so make sure you have 1.2x the size of the db of space in your environment. Depending on how big your db is it would take a long time.
@@ -87,23 +90,29 @@ See [README-Docker.md](README-Docker.md) for container deployment and [docs/](do
 
 Samples of currently running instances:
 
-- https://meshview.bayme.sh (SF Bay Area)
-- https://www.svme.sh (Sacramento Valley)
-- https://meshview.nyme.sh   (New York)
-- https://meshview.socalmesh.org (LA Area)
-- https://map.wpamesh.net (Western Pennsylvania)
-- https://meshview.chicagolandmesh.org (Chicago)
-- https://meshview.mt.gt (Canadaverse)
-- https://canadaverse.org (Canadaverse)
+- https://meshview.bayme.sh (SF Bay Area - USA)
+- https://www.svme.sh (Sacramento Valley - USA)
+- https://meshview.nyme.sh (New York - USA)
+- https://meshview.socalmesh.org (Los Angenles - USA)
+- https://map.wpamesh.net (Western Pennsylvania - USA)
+- https://meshview.chicagolandmesh.org (Chicago - USA)
+- https://meshview.mt.gt (Canada)
+- https://canadaverse.org (Canada)
 - https://meshview.meshtastic.es (Spain)
-- https://view.mtnme.sh (North Georgia / East Tennessee)
+- https://view.mtnme.sh (North Georgia / East Tennessee - USA)
 - https://meshview.lsinfra.de (Hessen - Germany)
-- https://meshview.pvmesh.org (Pioneer Valley, Massachusetts)
-- https://meshview.louisianamesh.org (Louisiana)
-- https://www.swlamesh.com/map (Southwest Louisiana)
-- https://meshview.meshcolombia.co/ (Colombia)
-- https://meshview-salzburg.jmt.gr/ (Salzburg / Austria)
+- https://meshview.pvmesh.org (Pioneer Valley, Massachusetts - USA)
+- https://meshview.louisianamesh.org (Louisiana - USA)
+- https://www.swlamesh.com (Southwest Louisiana- USA)
+- https://meshview.meshcolombia.co (Colombia)
+- https://meshview-salzburg.jmt.gr (Salzburg / Austria)
+- https://map.cromesh.eu (Coatia)
+- https://view.meshdresden.eu (Dresden / Germany)
+- https://meshview.meshoregon.com (Oregon - USA)
+- https://meshview.gamesh.net (Georgia - USA)
+
 ---
+
 
 
 ### Updating from 2.x to 3.x
