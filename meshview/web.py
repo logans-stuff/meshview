@@ -326,7 +326,8 @@ async def graph_traceroute(request):
             status=404,
         )
 
-    # Find related packets (request/response pairs) - strict matching
+    # Find related packets (request/response pairs) and MERGE their traceroutes
+    # This ensures both packets show the SAME combined graph
     related_packets = []
     if packet.from_node_id and packet.to_node_id and packet.import_time_us:
         # Only look within ±5 minutes of current packet
@@ -348,9 +349,13 @@ async def graph_traceroute(request):
             if rel_pkt.id == packet_id or rel_pkt.import_time_us > time_end:
                 continue
 
-            # Only include if this packet has traceroute data
+            # Get traceroutes from related packet
             rel_traceroutes = list(await store.get_traceroute(rel_pkt.id))
             if rel_traceroutes:
+                # CRITICAL: Merge related packet's traceroutes into our list
+                # This ensures the graph shows BOTH directions
+                traceroutes.extend(rel_traceroutes)
+
                 direction = "Response Packet" if rel_pkt.from_node_id == packet.to_node_id else "Request Packet"
                 related_packets.append({
                     'id': rel_pkt.id,
@@ -708,6 +713,29 @@ async def graph_traceroute_svg(request):
         return web.Response(
             status=404,
         )
+
+    # Find and merge related packets' traceroutes (same as main view)
+    if packet.from_node_id and packet.to_node_id and packet.import_time_us:
+        time_window_us = 5 * 60 * 1_000_000
+        time_start = packet.import_time_us - time_window_us
+        time_end = packet.import_time_us + time_window_us
+
+        related = await store.get_packets(
+            from_node_id=packet.to_node_id,
+            to_node_id=packet.from_node_id,
+            portnum=70,
+            after=time_start,
+            limit=20
+        )
+
+        for rel_pkt in related:
+            if rel_pkt.id == packet_id or rel_pkt.import_time_us > time_end:
+                continue
+
+            rel_traceroutes = list(await store.get_traceroute(rel_pkt.id))
+            if rel_traceroutes:
+                traceroutes.extend(rel_traceroutes)
+                break  # Only need one related packet
 
     # Build graph (reuse same logic but only return SVG)
     node_ids = set()
