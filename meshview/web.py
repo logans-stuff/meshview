@@ -436,15 +436,12 @@ async def graph_traceroute(request):
     node_color = {}
     mqtt_nodes = set()
     saw_reply = set()
-    dest = None
     node_seen_time = {}
 
     # Track which packet each traceroute belongs to
     for tr in traceroutes:
         if tr.done:
             saw_reply.add(tr.gateway_node_id)
-        if tr.done and dest:
-            continue
         route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
 
         # Determine which packet this traceroute is for
@@ -453,42 +450,63 @@ async def graph_traceroute(request):
         if not tr_packet:
             continue
 
-        # Use the traceroute's packet's from/to nodes, not the current packet's
-        path_start = tr_packet.from_node_id
-        path_end = tr_packet.to_node_id
+        # CRITICAL: Determine if this packet is request or response
+        # Always orient paths relative to the INITIATOR (sender)
+        is_response = tr.done  # done=True means this is a response packet
 
-        # Process forward path (from traceroute's perspective)
-        path = [path_start]
-        path.extend(route.route)
-        if tr.done:
-            dest = path_end
-            path.append(path_end)
-        elif path[-1] != tr.gateway_node_id:
-            # It seems some nodes add them self to the list before uplinking
-            path.append(tr.gateway_node_id)
+        if is_response:
+            # Response packet: from_node is target, to_node is initiator
+            # The route.route field contains RETURN path: target → initiator
+            # We need to identify initiator and target correctly
+            packet_initiator_id = tr_packet.to_node_id  # Who receives response = initiator
+            packet_target_id = tr_packet.from_node_id    # Who sends response = target
+        else:
+            # Request packet: from_node is initiator, to_node is target
+            # The route.route field contains FORWARD path: initiator → target
+            packet_initiator_id = tr_packet.from_node_id
+            packet_target_id = tr_packet.to_node_id
 
-        if not tr.done and tr.gateway_node_id not in node_seen_time and tr.import_time_us:
-            node_seen_time[path[-1]] = tr.import_time_us
-
-        mqtt_nodes.add(tr.gateway_node_id)
-        node_color[path[-1]] = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
-        paths.add(tuple(path))
-
-        # Process return path (route_back) - direction is reversed
-        if hasattr(route, 'route_back') and route.route_back:
-            return_path = [path_end]  # Start from destination
-            return_path.extend(route.route_back)
-            return_path.append(path_start)  # End at source
+        # Process the path based on packet type
+        if is_response:
+            # For response packets, route.route is the RETURN path (target → initiator)
+            # Build return path from target to initiator
+            return_path = [packet_target_id]
+            return_path.extend(route.route)
+            return_path.append(packet_initiator_id)
             node_color[return_path[-1]] = COLOR_PALETTE[hash(tuple(return_path)) % len(COLOR_PALETTE)]
             paths.add(tuple(return_path))
+        else:
+            # For request packets, route.route is the FORWARD path (initiator → target)
+            forward_path = [packet_initiator_id]
+            forward_path.extend(route.route)
+            if forward_path[-1] != tr.gateway_node_id:
+                forward_path.append(tr.gateway_node_id)
+
+            if tr.gateway_node_id not in node_seen_time and tr.import_time_us:
+                node_seen_time[forward_path[-1]] = tr.import_time_us
+
+            node_color[forward_path[-1]] = COLOR_PALETTE[hash(tuple(forward_path)) % len(COLOR_PALETTE)]
+            paths.add(tuple(forward_path))
+
+        mqtt_nodes.add(tr.gateway_node_id)
+
+        # Process return path (route_back) if present
+        # route_back contains return path: target → initiator
+        if hasattr(route, 'route_back') and route.route_back:
+            return_path_back = [packet_target_id]  # Start from target
+            return_path_back.extend(route.route_back)
+            return_path_back.append(packet_initiator_id)  # End at initiator
+            node_color[return_path_back[-1]] = COLOR_PALETTE[hash(tuple(return_path_back)) % len(COLOR_PALETTE)]
+            paths.add(tuple(return_path_back))
 
         # Process route_return field if present
+        # route_return also contains return path: target → initiator
         if tr.route_return:
             route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
             if route_return and hasattr(route_return, 'route'):
-                return_path_alt = [path_end]  # Start from destination
+                return_path_alt = [packet_target_id]  # Start from target
                 return_path_alt.extend(route_return.route)
-                return_path_alt.append(path_start)  # End at source
+                return_path_alt.append(packet_initiator_id)  # End at initiator
                 node_color[return_path_alt[-1]] = COLOR_PALETTE[hash(tuple(return_path_alt)) % len(COLOR_PALETTE)]
                 paths.add(tuple(return_path_alt))
 
@@ -766,52 +784,73 @@ async def graph_traceroute_svg(request):
     node_color = {}
     mqtt_nodes = set()
     saw_reply = set()
-    dest = None
     node_seen_time = {}
 
     for tr in traceroutes:
         if tr.done:
             saw_reply.add(tr.gateway_node_id)
-        if tr.done and dest:
-            continue
         route = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route)
 
         tr_packet = await store.get_packet(tr.packet_id)
         if not tr_packet:
             continue
 
-        path_start = tr_packet.from_node_id
-        path_end = tr_packet.to_node_id
+        # CRITICAL: Determine if this packet is request or response
+        # Always orient paths relative to the INITIATOR (sender)
+        is_response = tr.done  # done=True means this is a response packet
 
-        path = [path_start]
-        path.extend(route.route)
-        if tr.done:
-            dest = path_end
-            path.append(path_end)
-        elif path[-1] != tr.gateway_node_id:
-            path.append(tr.gateway_node_id)
+        if is_response:
+            # Response packet: from_node is target, to_node is initiator
+            # The route.route field contains RETURN path: target → initiator
+            packet_initiator_id = tr_packet.to_node_id  # Who receives response = initiator
+            packet_target_id = tr_packet.from_node_id    # Who sends response = target
+        else:
+            # Request packet: from_node is initiator, to_node is target
+            # The route.route field contains FORWARD path: initiator → target
+            packet_initiator_id = tr_packet.from_node_id
+            packet_target_id = tr_packet.to_node_id
 
-        if not tr.done and tr.gateway_node_id not in node_seen_time and tr.import_time_us:
-            node_seen_time[path[-1]] = tr.import_time_us
+        # Process the path based on packet type
+        if is_response:
+            # For response packets, route.route is the RETURN path (target → initiator)
+            return_path = [packet_target_id]
+            return_path.extend(route.route)
+            return_path.append(packet_initiator_id)
+            node_color[return_path[-1]] = COLOR_PALETTE[hash(tuple(return_path)) % len(COLOR_PALETTE)]
+            paths.add(tuple(return_path))
+        else:
+            # For request packets, route.route is the FORWARD path (initiator → target)
+            forward_path = [packet_initiator_id]
+            forward_path.extend(route.route)
+            if forward_path[-1] != tr.gateway_node_id:
+                forward_path.append(tr.gateway_node_id)
+
+            if tr.gateway_node_id not in node_seen_time and tr.import_time_us:
+                node_seen_time[forward_path[-1]] = tr.import_time_us
+
+            node_color[forward_path[-1]] = COLOR_PALETTE[hash(tuple(forward_path)) % len(COLOR_PALETTE)]
+            paths.add(tuple(forward_path))
 
         mqtt_nodes.add(tr.gateway_node_id)
-        node_color[path[-1]] = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
-        paths.add(tuple(path))
 
+        # Process return path (route_back) if present
+        # route_back contains return path: target → initiator
         if hasattr(route, 'route_back') and route.route_back:
-            return_path = [path_end]
-            return_path.extend(route.route_back)
-            return_path.append(path_start)
-            node_color[return_path[-1]] = '#' + hex(hash(tuple(return_path)))[3:9]
-            paths.add(tuple(return_path))
+            return_path_back = [packet_target_id]
+            return_path_back.extend(route.route_back)
+            return_path_back.append(packet_initiator_id)
+            node_color[return_path_back[-1]] = COLOR_PALETTE[hash(tuple(return_path_back)) % len(COLOR_PALETTE)]
+            paths.add(tuple(return_path_back))
 
+        # Process route_return field if present
+        # route_return also contains return path: target → initiator
         if tr.route_return:
             route_return = decode_payload.decode_payload(PortNum.TRACEROUTE_APP, tr.route_return)
             if route_return and hasattr(route_return, 'route'):
-                return_path_alt = [path_end]
+                return_path_alt = [packet_target_id]
                 return_path_alt.extend(route_return.route)
-                return_path_alt.append(path_start)
-                node_color[return_path_alt[-1]] = '#' + hex(hash(tuple(return_path_alt)))[3:9]
+                return_path_alt.append(packet_initiator_id)
+                node_color[return_path_alt[-1]] = COLOR_PALETTE[hash(tuple(return_path_alt)) % len(COLOR_PALETTE)]
                 paths.add(tuple(return_path_alt))
 
     used_nodes = set()
