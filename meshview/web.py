@@ -473,13 +473,15 @@ async def graph_traceroute(request):
 
         # Process the path based on packet type
         if is_response:
-            # For response packets, route.route is the RETURN path (target → initiator)
-            # Build return path from target to initiator
-            return_path = [packet_target_id]
-            return_path.extend(route.route)
-            return_path.append(packet_initiator_id)
-            node_color[return_path[-1]] = COLOR_PALETTE[hash(tuple(return_path)) % len(COLOR_PALETTE)]
-            paths.add(tuple(return_path))
+            # For response packets (done=True):
+            # - route.route contains the FORWARD path (initiator → target) that completed
+            # - route_back/route_return contain the RETURN path (target → initiator)
+            # Add the forward path first
+            forward_path_from_response = [packet_initiator_id]
+            forward_path_from_response.extend(route.route)
+            forward_path_from_response.append(packet_target_id)
+            node_color[forward_path_from_response[-1]] = COLOR_PALETTE[hash(tuple(forward_path_from_response)) % len(COLOR_PALETTE)]
+            paths.add(tuple(forward_path_from_response))
         else:
             # For request packets, route.route is the FORWARD path (initiator → target)
             forward_path = [packet_initiator_id]
