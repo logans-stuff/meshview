@@ -92,6 +92,8 @@ class Packet:
                 packet.portnum == PortNum.POSITION_APP
                 and getattr(payload, "latitude_i", None)
                 and getattr(payload, "longitude_i", None)
+                # Filter out (0,0) coordinates - firmware default fallback
+                and not (payload.latitude_i == 0 and payload.longitude_i == 0)
             ):
                 pretty_payload = Markup(
                     f'<a href="https://www.google.com/maps/search/?api=1&query={payload.latitude_i * 1e-7},{payload.longitude_i * 1e-7}" target="_blank">map</a>'
@@ -123,12 +125,18 @@ async def build_trace(node_id):
         p = Packet.from_model(raw_p)
         if not p.raw_payload or not p.raw_payload.latitude_i or not p.raw_payload.longitude_i:
             continue
+        # Filter out (0,0) coordinates - firmware default fallback
+        if p.raw_payload.latitude_i == 0 and p.raw_payload.longitude_i == 0:
+            continue
         trace.append((p.raw_payload.latitude_i * 1e-7, p.raw_payload.longitude_i * 1e-7))
 
     if not trace:
         for raw_p in await store.get_packets_from(node_id, PortNum.POSITION_APP):
             p = Packet.from_model(raw_p)
             if not p.raw_payload or not p.raw_payload.latitude_i or not p.raw_payload.longitude_i:
+                continue
+            # Filter out (0,0) coordinates - firmware default fallback
+            if p.raw_payload.latitude_i == 0 and p.raw_payload.longitude_i == 0:
                 continue
             trace.append((p.raw_payload.latitude_i * 1e-7, p.raw_payload.longitude_i * 1e-7))
             break
@@ -154,7 +162,8 @@ async def build_neighbors(node_id):
     for neighbor, node in zip(payload.neighbors, results, strict=False):
         if isinstance(node, Exception):
             continue
-        if node and node.last_lat and node.last_long:
+        # Filter out (0,0) coordinates - firmware default fallback
+        if node and node.last_lat and node.last_long and not (node.last_lat == 0 and node.last_long == 0):
             neighbors[neighbor.node_id] = {
                 'node_id': neighbor.node_id,
                 'snr': neighbor.snr,  # Fix dictionary keying issue
