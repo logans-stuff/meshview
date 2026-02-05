@@ -444,7 +444,7 @@ async def graph_traceroute(request):
 
         if is_response:
             # Response packet: from_node is target, to_node is initiator
-            # The route.route field contains RETURN path: target → initiator
+            # The route.route field contains FORWARD path: initiator → target (completed)
             # We need to identify initiator and target correctly
             packet_initiator_id = tr_packet.to_node_id  # Who receives response = initiator
             packet_target_id = tr_packet.from_node_id    # Who sends response = target
