@@ -323,6 +323,16 @@ async def stats(request):
     )
 
 
+@routes.get("/traceroute/{packet_id}")
+async def traceroute_page(request):
+    """New ECharts-based interactive traceroute visualization"""
+    template = env.get_template("traceroute_echarts.html")
+    return web.Response(
+        text=template.render(),
+        content_type="text/html",
+    )
+
+
 # Keep !!
 @routes.get("/graph/traceroute/{packet_id}")
 async def graph_traceroute(request):
