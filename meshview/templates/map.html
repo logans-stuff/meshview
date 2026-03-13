@@ -110,6 +110,8 @@
 <div id="filter-container">
     <input type="checkbox" class="filter-checkbox" id="filter-routers-only">
     <span data-translate-lang="show_routers_only">Show Routers Only</span>
+    <input type="checkbox" class="filter-checkbox" id="filter-mqtt-only">
+    <span data-translate-lang="show_mqtt_only">Show MQTT Gateways Only</span>
 </div>
 
 <div style="text-align:center;margin-top:5px;">
@@ -128,6 +130,7 @@
 <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylinedecorator.js"
         integrity="sha384-FhPn/2P/fJGhQLeNWDn9B/2Gml2bPOrKJwFqJXgR3xOPYxWg5mYQ5XZdhUSugZT0"
         crossorigin></script>
+<script src="/static/portmaps.js"></script>
 
 <script>
 /* ======================================================
@@ -179,15 +182,7 @@ var unmappedPackets = [];
 const UNMAPPED_LIMIT = 50;
 const UNMAPPED_TTL_MS = 5000;
 
-const portMap = {
-    1:"Text",
-    67:"Telemetry",
-    3:"Position",
-    70:"Traceroute",
-    4:"Node Info",
-    71:"Neighbour Info",
-    73:"Map Report"
-};
+const portMap = window.PORT_LABEL_MAP;
 
 const palette = ["#e6194b","#4363d8","#f58231","#911eb4","#46f0f0","#f032e6","#bcf60c","#fabebe",
                  "#008080","#e6beff","#9a6324","#fffac8","#800000","#aaffc3","#808000","#ffd8b1",
@@ -215,9 +210,73 @@ function hashToColor(str){
     return c;
 }
 
+function labelFor(key, fallback){
+    return mapTranslations[key] || fallback;
+}
+
+function buildNodePopup(node){
+    const labels = {
+        channel: labelFor("channel_label", "Channel"),
+        model: labelFor("model_label", "Model"),
+        role: labelFor("role_label", "Role"),
+        mqtt: labelFor("mqtt_gateway", "MQTT Gateway"),
+        lastSeen: labelFor("last_seen", "Last Seen"),
+        firmware: labelFor("firmware", "Firmware"),
+        yes: mapTranslations.yes || "Yes",
+        no: mapTranslations.no || "No"
+    };
+
+    return `
+        <b><a href="/node/${node.node_id}">${node.long_name}</a> (${node.short_name})</b><br>
+
+        <b>${labels.channel}</b> ${node.channel}<br>
+        <b>${labels.model}</b> ${node.hw_model}<br>
+        <b>${labels.role}</b> ${node.role}<br>
+        <b>${labels.mqtt}</b> ${node.is_mqtt_gateway ? labels.yes : labels.no}<br>
+
+        ${
+            node.last_seen_us
+                ? `<b>${labels.lastSeen}</b> ${timeAgoFromUs(node.last_seen_us)}<br>`
+                : ""
+        }
+
+        ${
+            node.firmware
+                ? `<b>${labels.firmware}</b> ${node.firmware}<br>`
+                : ""
+        }
+    `;
+}
+
+function hashToUnit(str){
+    let h = 2166136261;
+    for(let i=0;i<str.length;i++){
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0) / 0xffffffff;
+}
+
+function jitterLatLng(lat, lon, key){
+    const meters = 15; // small, visually separates overlaps
+    const angle = hashToUnit(String(key)) * Math.PI * 2;
+    const r = meters * (0.3 + 0.7 * hashToUnit(`r:${key}`));
+    const dLat = (r * Math.cos(angle)) / 111320;
+    const dLon = (r * Math.sin(angle)) / (111320 * Math.cos(lat * Math.PI / 180));
+    return [lat + dLat, lon + dLon];
+}
+
 function isInvalidCoord(n){
     return !n || !n.lat || !n.long || n.lat === 0 || n.long === 0 ||
            Number.isNaN(n.lat) || Number.isNaN(n.long);
+}
+
+function getNodeLatLng(n){
+    const marker = markerById[n.key];
+    if(marker){
+        return marker.getLatLng();
+    }
+    return { lat: n.lat, lng: n.long };
 }
 
 /* ======================================================
@@ -355,6 +414,7 @@ fetch('/api/nodes?days_active=3')
             role: n.role || "",
             firmware: n.firmware || "",
             last_seen_us: n.last_seen_us || null,
+            is_mqtt_gateway: n.is_mqtt_gateway === true,
             isRouter: (n.role||"").toLowerCase().includes("router")
         }));
 
@@ -378,7 +438,8 @@ function renderNodesOnMap(){
 
         const color = hashToColor(node.channel);
 
-        const marker = L.circleMarker([node.lat,node.long], {
+        const [jLat, jLon] = jitterLatLng(node.lat, node.long, node.key);
+        const marker = L.circleMarker([jLat,jLon], {
             radius: node.isRouter ? 9 : 7,
             color: "white",
             fillColor: color,
@@ -390,29 +451,11 @@ function renderNodesOnMap(){
         marker.originalColor = color;
         markerById[node.key] = marker;
 
-        const popup = `
-            <b><a href="/node/${node.node_id}">${node.long_name}</a> (${node.short_name})</b><br>
-
-            <b data-translate-lang="channel_label"></b> ${node.channel}<br>
-            <b data-translate-lang="model_label"></b> ${node.hw_model}<br>
-            <b data-translate-lang="role_label"></b> ${node.role}<br>
-
-            ${
-                node.last_seen_us
-                    ? `<b data-translate-lang="last_seen"></b> ${timeAgoFromUs(node.last_seen_us)}<br>`
-                    : ""
-            }
-
-            ${
-                node.firmware
-                    ? `<b data-translate-lang="firmware"></b> ${node.firmware}<br>`
-                    : ""
-            }
-        `;
-
+        marker.bindPopup(buildNodePopup(node));
         marker.on('click', () => {
             onNodeClick(node);
-            marker.bindPopup(popup).openPopup();
+            marker.setPopupContent(buildNodePopup(node));
+            marker.openPopup();
         });
     });
 
@@ -503,7 +546,9 @@ async function onNodeClick(node){
             if(!f || !t || isInvalidCoord(f) || isInvalidCoord(t)) return;
 
             const color = edge.type === "neighbor" ? "gray" : "orange";
-            const line  = L.polyline([[f.lat, f.long], [t.lat, t.long]], {
+            const fLatLng = getNodeLatLng(f);
+            const tLatLng = getNodeLatLng(t);
+            const line  = L.polyline([[fLatLng.lat, fLatLng.lng], [tLatLng.lat, tLatLng.lng]], {
                 color, weight: 3
             }).addTo(edgeLayer);
 
@@ -611,10 +656,14 @@ function createChannelFilters(){
     });
 
     const routerOnly=document.getElementById("filter-routers-only");
+    const mqttOnly=document.getElementById("filter-mqtt-only");
     routerOnly.checked = saved["routersOnly"] || false;
+    mqttOnly.checked = saved["mqttOnly"] || false;
 
     routerOnly.addEventListener("change", saveFiltersToLocalStorage);
     routerOnly.addEventListener("change", updateNodeVisibility);
+    mqttOnly.addEventListener("change", saveFiltersToLocalStorage);
+    mqttOnly.addEventListener("change", updateNodeVisibility);
 
     updateNodeVisibility();
 }
@@ -625,12 +674,14 @@ function saveFiltersToLocalStorage(){
         state[ch] = document.getElementById(`filter-channel-${ch}`).checked;
     });
     state["routersOnly"] = document.getElementById("filter-routers-only").checked;
+    state["mqttOnly"] = document.getElementById("filter-mqtt-only").checked;
 
     localStorage.setItem("mapFilters", JSON.stringify(state));
 }
 
 function updateNodeVisibility(){
     const routerOnly = document.getElementById("filter-routers-only").checked;
+    const mqttOnly = document.getElementById("filter-mqtt-only").checked;
     const activeChannels = [...channelSet].filter(ch =>
         document.getElementById(`filter-channel-${ch}`).checked
     );
@@ -640,6 +691,7 @@ function updateNodeVisibility(){
         if(marker){
             const visible =
                 (!routerOnly || n.isRouter) &&
+                (!mqttOnly || n.is_mqtt_gateway) &&
                 activeChannels.includes(n.channel);
 
             visible ? map.addLayer(marker) : map.removeLayer(marker);
@@ -670,6 +722,7 @@ function shareCurrentView() {
 
 function resetFiltersToDefaults(){
     document.getElementById("filter-routers-only").checked = false;
+    document.getElementById("filter-mqtt-only").checked = false;
     channelSet.forEach(ch => {
         document.getElementById(`filter-channel-${ch}`).checked = true;
     });

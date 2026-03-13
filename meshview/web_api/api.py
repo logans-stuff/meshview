@@ -3,18 +3,28 @@
 import datetime
 import json
 import logging
+import math
 import os
 
 from aiohttp import web
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from meshtastic.protobuf.portnums_pb2 import PortNum
 from meshview import database, decode_payload, store
 from meshview.__version__ import __version__, _git_revision_short, get_version_info, get_display_version
 from meshview.config import CONFIG
-from meshview.models import Node
+from meshview.models import Node, NodePublicKey
 from meshview.models import Packet as PacketModel
 from meshview.models import PacketSeen as PacketSeenModel
+from meshview.radio.coverage import (
+    DEFAULT_MAX_DBM,
+    DEFAULT_MIN_DBM,
+    DEFAULT_RELIABILITY,
+    DEFAULT_THRESHOLD_DBM,
+    ITM_AVAILABLE,
+    compute_coverage,
+    compute_perimeter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +36,29 @@ _LANG_CACHE = {}
 
 # Create dedicated route table for API endpoints
 routes = web.RouteTableDef()
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _bearing_deg(lat1, lon1, lat2, lon2):
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlambda = math.radians(lon2 - lon1)
+    y = math.sin(dlambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+    bearing = math.degrees(math.atan2(y, x))
+    return (bearing + 360.0) % 360.0
+
+
+OBSERVED_MAX_DISTANCE_KM = 50.0
 
 
 def init_api_module(packet_class, seq_regex, lang_dir):
@@ -84,7 +117,9 @@ async def api_nodes(request):
                     "last_lat": getattr(n, "last_lat", None),
                     "last_long": getattr(n, "last_long", None),
                     "channel": n.channel,
+                    "is_mqtt_gateway": getattr(n, "is_mqtt_gateway", None),
                     # "last_update": n.last_update.isoformat(),
+                    "first_seen_us": n.first_seen_us,
                     "last_seen_us": n.last_seen_us,
                 }
             )
@@ -635,8 +670,14 @@ async def health_check(request):
     # Check database connectivity
     try:
         async with database.async_session() as session:
-            await session.execute(text("SELECT 1"))
+            result = await session.execute(select(func.max(PacketModel.import_time_us)))
+            last_import_time_us = result.scalar()
         health_status["database"] = "connected"
+        if last_import_time_us is not None:
+            now_us = int(datetime.datetime.now(datetime.UTC).timestamp() * 1_000_000)
+            health_status["seconds_since_last_message"] = round(
+                (now_us - last_import_time_us) / 1_000_000, 1
+            )
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         health_status["database"] = "disconnected"
@@ -929,4 +970,193 @@ async def api_stats_top(request):
             "offset": offset,
             "nodes": nodes,
         }
+    )
+
+
+@routes.get("/api/node/{node_id}/qr")
+async def api_node_qr(request):
+    """
+    Generate a Meshtastic URL for importing the node as a contact.
+    Returns the URL that can be used to generate a QR code.
+    """
+    try:
+        node_id_str = request.match_info["node_id"]
+        node_id = int(node_id_str, 0)
+    except (KeyError, ValueError):
+        return web.json_response({"error": "Invalid node_id"}, status=400)
+
+    node = await store.get_node(node_id)
+    if not node:
+        return web.json_response({"error": "Node not found"}, status=404)
+
+    try:
+        from meshtastic.protobuf.admin_pb2 import SharedContact
+        from meshtastic.protobuf.mesh_pb2 import User
+
+        user = User()
+        user.id = f"!{node_id:08x}"
+        if node.long_name:
+            user.long_name = node.long_name
+        if node.short_name:
+            user.short_name = node.short_name
+        if node.hw_model:
+            try:
+                from meshtastic.protobuf.mesh_pb2 import HardwareModel
+
+                hw_model_value = getattr(HardwareModel, node.hw_model.upper(), None)
+                if hw_model_value is not None:
+                    user.hw_model = hw_model_value
+            except (AttributeError, TypeError):
+                pass
+
+        contact = SharedContact()
+        contact.node_num = node_id
+        contact.user.CopyFrom(user)
+        contact.manually_verified = False
+
+        contact_bytes = contact.SerializeToString()
+        import base64
+
+        contact_b64 = base64.b64encode(contact_bytes).decode("ascii")
+        contact_b64url = contact_b64.replace("+", "-").replace("/", "_").rstrip("=")
+
+        meshtastic_url = f"https://meshtastic.org/v/#{contact_b64url}"
+
+        return web.json_response(
+            {
+                "node_id": node_id,
+                "long_name": node.long_name,
+                "short_name": node.short_name,
+                "meshtastic_url": meshtastic_url,
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        logger.error(f"Error generating QR URL for node {node_id}: {e}")
+        logger.error(traceback.format_exc())
+        return web.json_response({"error": f"Failed to generate URL: {str(e)}"}, status=500)
+
+
+@routes.get("/api/node/{node_id}/impersonation-check")
+async def api_node_impersonation_check(request):
+    """
+    Check if a node has multiple different public keys, which could indicate impersonation.
+    """
+    try:
+        node_id_str = request.match_info["node_id"]
+        node_id = int(node_id_str, 0)
+    except (KeyError, ValueError):
+        return web.json_response({"error": "Invalid node_id"}, status=400)
+
+    try:
+        async with database.async_session() as session:
+            result = await session.execute(
+                select(NodePublicKey.public_key).where(NodePublicKey.node_id == node_id).distinct()
+            )
+            public_keys = result.scalars().all()
+
+            unique_key_count = len(public_keys)
+
+            return web.json_response(
+                {
+                    "node_id": node_id,
+                    "unique_public_key_count": unique_key_count,
+                    "potential_impersonation": unique_key_count > 1,
+                    "public_keys": public_keys
+                    if unique_key_count <= 3
+                    else public_keys[:3] + ["..."],
+                    "warning": "Multiple different public keys detected. This node may be getting impersonated."
+                    if unique_key_count > 1
+                    else None,
+                }
+            )
+    except Exception as e:
+        logger.error(f"Error checking impersonation for node {node_id}: {e}")
+        return web.json_response({"error": "Failed to check impersonation"}, status=500)
+
+
+@routes.get("/api/coverage/{node_id}")
+async def api_coverage(request):
+    try:
+        node_id = int(request.match_info["node_id"], 0)
+    except (KeyError, ValueError):
+        return web.json_response({"error": "Invalid node_id"}, status=400)
+
+    if not ITM_AVAILABLE:
+        return web.json_response(
+            {"error": "Coverage requires pyitm. Run: pip install -r requirements.txt"},
+            status=503,
+        )
+
+    def parse_float(name, default):
+        value = request.query.get(name)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": f"{name} must be a number"}),
+                content_type="application/json",
+            ) from exc
+
+    try:
+        freq_mhz = parse_float("freq_mhz", 907.0)
+        tx_dbm = parse_float("tx_dbm", 20.0)
+        tx_height_m = parse_float("tx_height_m", 5.0)
+        rx_height_m = parse_float("rx_height_m", 1.5)
+        radius_km = parse_float("radius_km", 40.0)
+        step_km = parse_float("step_km", 0.25)
+        reliability = parse_float("reliability", DEFAULT_RELIABILITY)
+        threshold_dbm = parse_float("threshold_dbm", DEFAULT_THRESHOLD_DBM)
+    except web.HTTPBadRequest as exc:
+        raise exc
+
+    node = await store.get_node(node_id)
+    if not node or not node.last_lat or not node.last_long:
+        return web.json_response({"error": "Node not found or missing location"}, status=404)
+
+    lat = node.last_lat * 1e-7
+    lon = node.last_long * 1e-7
+
+    mode = request.query.get("mode", "perimeter")
+    if mode == "perimeter":
+        perimeter = compute_perimeter(
+            lat=round(lat, 7),
+            lon=round(lon, 7),
+            freq_mhz=round(freq_mhz, 3),
+            tx_dbm=round(tx_dbm, 2),
+            tx_height_m=round(tx_height_m, 2),
+            rx_height_m=round(rx_height_m, 2),
+            radius_km=round(radius_km, 2),
+            step_km=round(step_km, 3),
+            reliability=round(reliability, 3),
+            threshold_dbm=round(threshold_dbm, 1),
+        )
+        return web.json_response(
+            {"mode": "perimeter", "threshold_dbm": threshold_dbm, "perimeter": perimeter}
+        )
+
+    points = compute_coverage(
+        lat=round(lat, 7),
+        lon=round(lon, 7),
+        freq_mhz=round(freq_mhz, 3),
+        tx_dbm=round(tx_dbm, 2),
+        tx_height_m=round(tx_height_m, 2),
+        rx_height_m=round(rx_height_m, 2),
+        radius_km=round(radius_km, 2),
+        step_km=round(step_km, 3),
+        reliability=round(reliability, 3),
+    )
+
+    min_dbm = DEFAULT_MIN_DBM
+    max_dbm = DEFAULT_MAX_DBM
+    if points:
+        vals = [p[2] for p in points]
+        min_dbm = min(min_dbm, min(vals))
+        max_dbm = max(max_dbm, max(vals))
+
+    return web.json_response(
+        {"mode": "heatmap", "min_dbm": min_dbm, "max_dbm": max_dbm, "points": points}
     )

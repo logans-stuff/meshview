@@ -1,9 +1,8 @@
-import datetime
 import logging
 import re
 import time
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -12,9 +11,11 @@ from meshtastic.protobuf.config_pb2 import Config
 from meshtastic.protobuf.mesh_pb2 import HardwareModel
 from meshtastic.protobuf.portnums_pb2 import PortNum
 from meshview import decode_payload, mqtt_database
-from meshview.models import Node, Packet, PacketSeen, Traceroute
+from meshview.models import Node, NodePublicKey, Packet, PacketSeen, Traceroute
 
 logger = logging.getLogger(__name__)
+
+MQTT_GATEWAY_CACHE: set[int] = set()
 
 
 async def process_envelope(topic, env):
@@ -97,10 +98,9 @@ async def process_envelope(topic, env):
                 "import_time_us": now_us,
                 "channel": env.channel_id,
             }
-            utc_time = datetime.datetime.fromtimestamp(now_us / 1_000_000, datetime.UTC)
             dialect = session.get_bind().dialect.name
             stmt = None
-            
+
             if dialect == "sqlite":
                 stmt = (
                     sqlite_insert(Packet)
@@ -132,6 +132,12 @@ async def process_envelope(topic, env):
             return
         else:
             node_id = int(env.gateway_id[1:], 16)
+
+        if node_id not in MQTT_GATEWAY_CACHE:
+            MQTT_GATEWAY_CACHE.add(node_id)
+            await session.execute(
+                update(Node).where(Node.node_id == node_id).values(is_mqtt_gateway=True)
+            )
 
         result = await session.execute(
             select(PacketSeen).where(
@@ -208,6 +214,28 @@ async def process_envelope(topic, env):
                             last_seen_us=now_us,
                         )
                         session.add(node)
+
+                    if user.public_key:
+                        public_key_hex = user.public_key.hex()
+                        existing_key = (
+                            await session.execute(
+                                select(NodePublicKey).where(
+                                    NodePublicKey.node_id == node_id,
+                                    NodePublicKey.public_key == public_key_hex,
+                                )
+                            )
+                        ).scalar_one_or_none()
+
+                        if existing_key:
+                            existing_key.last_seen_us = now_us
+                        else:
+                            new_key = NodePublicKey(
+                                node_id=node_id,
+                                public_key=public_key_hex,
+                                first_seen_us=now_us,
+                                last_seen_us=now_us,
+                            )
+                            session.add(new_key)
             except Exception as e:
                 print(f"Error processing NODEINFO_APP: {e}")
 
@@ -246,3 +274,11 @@ async def process_envelope(topic, env):
                 )
 
         await session.commit()
+
+
+async def load_gateway_cache():
+    async with mqtt_database.async_session() as session:
+        result = await session.execute(
+            select(Node.node_id).where(Node.is_mqtt_gateway == True)  # noqa: E712
+        )
+        MQTT_GATEWAY_CACHE.update(result.scalars().all())

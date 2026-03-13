@@ -20,6 +20,7 @@ class Node(Base):
     last_lat: Mapped[int] = mapped_column(BigInteger, nullable=True)
     last_long: Mapped[int] = mapped_column(BigInteger, nullable=True)
     channel: Mapped[str] = mapped_column(nullable=True)
+    is_mqtt_gateway: Mapped[bool] = mapped_column(nullable=True)
     first_seen_us: Mapped[int] = mapped_column(BigInteger, nullable=True)
     last_seen_us: Mapped[int] = mapped_column(BigInteger, nullable=True)
 
@@ -100,7 +101,21 @@ class Traceroute(Base):
     import_time_us: Mapped[int] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
-    Index("idx_traceroute_packet_id", "packet_id"),
-    Index("idx_traceroute_import_time_us", "import_time_us"),
-)
+        Index("idx_traceroute_packet_id", "packet_id"),
+        Index("idx_traceroute_import_time_us", "import_time_us"),
+    )
 
+
+class NodePublicKey(Base):
+    __tablename__ = "node_public_key"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    public_key: Mapped[str] = mapped_column(nullable=False)
+    first_seen_us: Mapped[int] = mapped_column(BigInteger, nullable=True)
+    last_seen_us: Mapped[int] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index("idx_node_public_key_node_id", "node_id"),
+        Index("idx_node_public_key_public_key", "public_key"),
+    )
