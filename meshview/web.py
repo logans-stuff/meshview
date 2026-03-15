@@ -398,10 +398,22 @@ async def graph_traceroute(request):
         for node_id in node_ids:
             nodes[node_id] = tg.create_task(store.get_node(node_id))
 
-    # Use the current packet's direction for initiator/target
-    # The packet being viewed should determine the graph orientation
-    initiator_id = packet.from_node_id
-    target_id = packet.to_node_id
+    # Identify the traceroute INITIATOR (who started the exchange)
+    initiator_id = None
+    target_id = None
+    for tr in traceroutes:
+        tr_packet_early = await store.get_packet(tr.packet_id)
+        if tr_packet_early:
+            if not tr.done:
+                initiator_id = tr_packet_early.from_node_id
+                target_id = tr_packet_early.to_node_id
+                break
+            elif tr.done and not initiator_id:
+                initiator_id = tr_packet_early.to_node_id
+                target_id = tr_packet_early.from_node_id
+    if not initiator_id:
+        initiator_id = packet.from_node_id
+        target_id = packet.to_node_id
 
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
@@ -546,38 +558,6 @@ async def graph_traceroute(request):
             )
         )
 
-    for path in paths:
-        color = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
-        for src, dest_node in zip(path, path[1:], strict=False):
-            graph.add_edge(pydot.Edge(src, dest_node, color=color))
-
-    # Build route analysis data
-    # IMPORTANT: Identify the traceroute INITIATOR (who started the exchange)
-    # The traceroute exchange has a request and response - we need to show
-    # paths relative to whoever initiated it, not relative to current packet
-
-    initiator_id = None
-    target_id = None
-
-    # Find the initiator by looking at traceroutes
-    for tr in traceroutes:
-        tr_packet = await store.get_packet(tr.packet_id)
-        if tr_packet:
-            if not tr.done:
-                # This is a request/incomplete hop - this packet's sender is the initiator
-                initiator_id = tr_packet.from_node_id
-                target_id = tr_packet.to_node_id
-                break
-            elif tr.done and not initiator_id:
-                # This is a completed response - sender is target, receiver is initiator
-                initiator_id = tr_packet.to_node_id
-                target_id = tr_packet.from_node_id
-
-    # Fallback to current packet if we couldn't determine initiator
-    if not initiator_id:
-        initiator_id = packet.from_node_id
-        target_id = packet.to_node_id
-
     forward_path_nodes = []
     return_path_nodes = []
     forward_complete = False
@@ -592,9 +572,12 @@ async def graph_traceroute(request):
         return_complete = True
 
     # Analyze paths relative to the INITIATOR (not current packet)
+    forward_paths = set()
+    return_paths = set()
     for path in paths:
         # Forward direction: initiator → target
         if path[0] == initiator_id:
+            forward_paths.add(path)
             if path[-1] == target_id:
                 # Path reaches target - definitely complete
                 forward_complete = True
@@ -606,6 +589,7 @@ async def graph_traceroute(request):
 
         # Return direction: target → initiator
         if path[0] == target_id:
+            return_paths.add(path)
             if path[-1] == initiator_id:
                 # Path reaches initiator - definitely complete
                 return_complete = True
@@ -614,6 +598,16 @@ async def graph_traceroute(request):
             elif not return_path_nodes:
                 # Incomplete return path, use if we don't have one yet
                 return_path_nodes = list(path)
+
+    # Add edges with distinct styles for forward vs return paths
+    for path in paths:
+        color = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
+        is_return = path in return_paths
+        for src, dest_node in zip(path, path[1:], strict=False):
+            edge_attrs = {'color': color}
+            if is_return:
+                edge_attrs['style'] = 'dashed'
+            graph.add_edge(pydot.Edge(src, dest_node, **edge_attrs))
 
     # Convert node IDs to names for display
     async def get_node_name(node_id):
@@ -712,10 +706,22 @@ async def graph_traceroute_svg(request):
         for node_id in node_ids:
             nodes[node_id] = tg.create_task(store.get_node(node_id))
 
-    # Use the current packet's direction for initiator/target
-    # The packet being viewed should determine the graph orientation
-    initiator_id = packet.from_node_id
-    target_id = packet.to_node_id
+    # Identify the traceroute INITIATOR (who started the exchange)
+    initiator_id = None
+    target_id = None
+    for tr in traceroutes:
+        tr_packet_early = await store.get_packet(tr.packet_id)
+        if tr_packet_early:
+            if not tr.done:
+                initiator_id = tr_packet_early.from_node_id
+                target_id = tr_packet_early.to_node_id
+                break
+            elif tr.done and not initiator_id:
+                initiator_id = tr_packet_early.to_node_id
+                target_id = tr_packet_early.from_node_id
+    if not initiator_id:
+        initiator_id = packet.from_node_id
+        target_id = packet.to_node_id
 
     graph = pydot.Dot('traceroute', graph_type="digraph")
 
@@ -857,10 +863,20 @@ async def graph_traceroute_svg(request):
             )
         )
 
+    # Classify paths as forward or return, style edges differently
+    return_path_set = set()
+    for path in paths:
+        if path[0] == target_id:
+            return_path_set.add(path)
+
     for path in paths:
         color = COLOR_PALETTE[hash(tuple(path)) % len(COLOR_PALETTE)]
+        is_return = path in return_path_set
         for src, dest_node in zip(path, path[1:], strict=False):
-            graph.add_edge(pydot.Edge(src, dest_node, color=color))
+            edge_attrs = {'color': color}
+            if is_return:
+                edge_attrs['style'] = 'dashed'
+            graph.add_edge(pydot.Edge(src, dest_node, **edge_attrs))
 
     # Return just the SVG
     return web.Response(
