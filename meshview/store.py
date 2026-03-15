@@ -175,10 +175,12 @@ async def get_traceroute(packet_id):
                         Packet.from_node_id == packet.to_node_id,
                         Packet.to_node_id == packet.from_node_id,
                         Packet.portnum == 70,  # TRACEROUTE_APP
-                        Packet.id != packet_id  # Exclude self
+                        Packet.id != packet_id,  # Exclude self
+                        # Response must come after the request
+                        *([Packet.import_time_us >= packet.import_time_us] if packet.import_time_us else [])
                     )
                 )
-                .order_by(Packet.import_time_us.desc())
+                .order_by(Packet.import_time_us.asc())
                 .limit(20)  # Get more candidates to compare routes
             )
             candidates = [(row[0], row[1]) for row in related_packets]
