@@ -501,6 +501,22 @@ async def graph_traceroute(request):
                 node_color[return_path_alt[-1]] = COLOR_PALETTE[hash(tuple(return_path_alt)) % len(COLOR_PALETTE)]
                 paths.add(tuple(return_path_alt))
 
+    # Filter return paths: only keep those ending at initiator or a known relay node
+    # This removes spurious paths from gateways that overheard the response
+    # but aren't on the actual return route (e.g. nodes past the target)
+    forward_nodes = set()
+    for path in paths:
+        if path[0] == initiator_id:
+            forward_nodes.update(path)
+    filtered_paths = set()
+    for path in paths:
+        if path[0] == target_id:
+            if path[-1] == initiator_id or path[-1] in forward_nodes:
+                filtered_paths.add(path)
+        else:
+            filtered_paths.add(path)
+    paths = filtered_paths
+
     used_nodes = set()
     for path in paths:
         used_nodes.update(path)
@@ -805,6 +821,20 @@ async def graph_traceroute_svg(request):
                 return_path_alt.append(tr_packet.from_node_id)  # End at source
                 node_color[return_path_alt[-1]] = COLOR_PALETTE[hash(tuple(return_path_alt)) % len(COLOR_PALETTE)]
                 paths.add(tuple(return_path_alt))
+
+    # Filter return paths: only keep those ending at initiator or a known relay node
+    forward_nodes = set()
+    for path in paths:
+        if path[0] == initiator_id:
+            forward_nodes.update(path)
+    filtered_paths = set()
+    for path in paths:
+        if path[0] == target_id:
+            if path[-1] == initiator_id or path[-1] in forward_nodes:
+                filtered_paths.add(path)
+        else:
+            filtered_paths.add(path)
+    paths = filtered_paths
 
     used_nodes = set()
     for path in paths:
